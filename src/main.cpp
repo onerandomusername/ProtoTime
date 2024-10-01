@@ -151,6 +151,49 @@ void WiFiEvent(arduino_event_id_t event) {
   }
 }
 
+int calculateChecksum(const char *msg) {
+  int checksum = 0;
+  for (int i = 0; msg[i] && i < 32; i++)
+    checksum ^= (unsigned char)msg[i];
+
+  return checksum;
+}
+
+void nemaMsgSend(const char *msg) {
+  char checksum[8];
+  snprintf(checksum, sizeof(checksum) - 1, "*%.2X", calculateChecksum(msg));
+  GPSSerial.print("$");
+  Serial.print("$");
+  GPSSerial.print(msg);
+  Serial.print(msg);
+  GPSSerial.println(checksum);
+  Serial.println(checksum);
+}
+
+int nemaMsgDisable(const char *nema) {
+  if (strlen(nema) != 3)
+    return 0;
+
+  char tmp[32];
+  // snprintf(tmp, sizeof(tmp)-1, "PUBX,40,%s,0,0,0,0", nema);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
+  nemaMsgSend(tmp);
+
+  return 1;
+}
+
+int nemaMsgEnable(const char *nema) {
+  if (strlen(nema) != 3)
+    return 0;
+
+  char tmp[32];
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nema);
+  snprintf(tmp, sizeof(tmp)-1, "PUBX,40,%s,0,1,0,0,0,0", nema);
+  nemaMsgSend(tmp);
+
+  return 1;
+}
+
 void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -178,18 +221,13 @@ void setup() {
     Serial.println(vers);
   }
 
-  // Disable everything but $GNRMC
+  // Disable everything but $GPRMC
   // Note the following sentences are for UBLOX NEO6MV2 GPS
-
-  // LM: These sentences are the same for the NEO-M8N   -  Comments added
-  // GPSSerial.write("$PUBX,40,GLL,0,0,0,0,0,0*5C\r\n"); // Lat/Lon data
-  // GPSSerial.write(
-  //     "$PUBX,40,VTG,0,0,0,0,0,0*5E\r\n"); // Vector track and speed over
-  //     ground
-  // GPSSerial.write("$PUBX,40,GSV,0,0,0,0,0,0*59\r\n"); // Detailed satellite
-  // data GPSSerial.write("$PUBX,40,GGA,0,0,0,0,0,0*5A\r\n"); // Fix information
-  // GPSSerial.write("$PUBX,40,GSA,0,0,0,0,0,0*4E\r\n"); // Overall satellite
-  // data
+  nemaMsgDisable("GLL");
+  nemaMsgDisable("VTG");
+  nemaMsgDisable("GSV");
+  nemaMsgDisable("GGA");
+  nemaMsgDisable("GSA");
 
   Wire1.begin(RTC_SDA_PIN, RTC_SCL_PIN);
   delay(250);
