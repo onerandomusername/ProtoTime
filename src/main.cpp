@@ -4,7 +4,7 @@
 
 // PINS
 //  GPS
-const u_int8_t GPS_RX_PIN = 2;
+const u_int8_t GPS_RX_PIN = 36;
 const u_int8_t GPS_TX_PIN = 4;
 const u_int8_t GPS_PPS_PIN = 33;
 
