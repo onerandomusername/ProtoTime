@@ -476,29 +476,17 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
 boolean getGPSdata() {
   long startTime = millis();
   uint16_t timeout = 5000;
-  do {
-    while (GPSSerial.available()) {
-      // Serial.write(GPSSerial.read());
-      gps.encode(GPSSerial.read());
-    }
-  } while (millis() - startTime < timeout && !gps.time.isValid());
+  for (int i = 0; i < 2; i++) {
+    do {
+      while (GPSSerial.available()) {
+        char r = GPSSerial.read();
+        Serial.write(r);
+        gps.encode(r);
+      }
+    } while (millis() - startTime < timeout && !gps.time.isValid());
+    yield();
+  };
   return gps.time.isValid();
-}
-
-// My message utilities
-
-void crack(String sDate, String sTime) {
-  // sDate = ddmmyy
-  // sTime = hhmmss
-  // hundredths = 00
-  year = sDate.substring(4).toInt() + CENTURY;
-  month = sDate.substring(2, 4).toInt();
-  day = sDate.substring(0, 2).toInt();
-  hour = sTime.substring(0, 2).toInt();
-  minute = sTime.substring(2, 4).toInt();
-  second = sTime.substring(4).toInt();
-  hundredths = 0; // LM: GPS time is always acquired on the second (not used)
-  age = 0;        //     Not used in this adaptation
 }
 
 // RTC support
