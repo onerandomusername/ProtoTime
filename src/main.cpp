@@ -72,7 +72,7 @@ uint32_t timestamp, tempval;
 
 // LM: GPS message parsing
 const char EOL = 10;   // End-of-line
-const int MSGLEN = 67; // GNRMC message length, 66 printable characters + \r
+const int MSGLEN = 66; // GNRMC message length, 66 printable characters + \r
 String tmpMsg = "";
 String gnrmcMsg = "";
 
@@ -111,6 +111,7 @@ void crack(String sDate, String sTime);
 void updateRTC();
 boolean rtcUpdateDue();
 void readRTC();
+bool getgps();
 void displayTime();
 String formatMS(int ms);
 
@@ -175,8 +176,8 @@ int nemaMsgDisable(const char *nema) {
     return 0;
 
   char tmp[32];
-  // snprintf(tmp, sizeof(tmp)-1, "PUBX,40,%s,0,0,0,0", nema);
-  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0", nema);
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
   nemaMsgSend(tmp);
 
   return 1;
@@ -188,7 +189,7 @@ int nemaMsgEnable(const char *nema) {
 
   char tmp[32];
   // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nema);
-  snprintf(tmp, sizeof(tmp)-1, "PUBX,40,%s,0,1,0,0,0,0", nema);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0,0,0", nema);
   nemaMsgSend(tmp);
 
   return 1;
@@ -198,14 +199,18 @@ void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
-  while (millis() < 2000 && !Serial.availableForWrite()) {
+  while (millis() < 1000 && !Serial.availableForWrite()) {
     Serial.println("Waiting for Serial Monitor...");
     delay(500);
   } // wait for Arduino Serial Monitor
 
   WiFi.onEvent(WiFiEvent);
 
-  while (millis() < 3000 && gps.charsProcessed() < 10) {
+  while (millis() < 5000 && gps.charsProcessed() < 60 &&
+         !GPSSerial.availableForWrite()) {
+    Serial.println("Waiting for GPS Serial Monitor...");
+    // getgps();
+    delay(500);
   } // wait for GPS Serial Monitor
 
   // start Ethernet and UDP:
@@ -222,7 +227,6 @@ void setup() {
   }
 
   // Disable everything but $GPRMC
-  // Note the following sentences are for UBLOX NEO6MV2 GPS
   nemaMsgDisable("GLL");
   nemaMsgDisable("VTG");
   nemaMsgDisable("GSV");
@@ -245,7 +249,12 @@ void setup() {
     displayTime();
   }
   // If RTC is present and functional, update it from GPS (if possible)
+  delay(3000);
   if (rtcON) {
+    // empty the serial buffer
+    while (GPSSerial.available()) {
+      GPSSerial.read();
+    }
     updateRTC();
     displayTime();
   };
@@ -270,7 +279,11 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
               // second) and called processNTP() when valid data were received
               // (i.e. on the second). This revision monitors NTP port
               // continuously and attempts to retrieve GPS data whenever an NTP
-              // request is received.
+              // request is received.\
+  // empty the serial buffer
+  while (GPSSerial.available()) {
+    GPSSerial.read();
+  }
   if (eth_connected) {
     processNTP();
   }
@@ -428,6 +441,26 @@ void processNTP() {
 //     Nor did gps.encode(c). So I modified this function to construct a string
 //     from the $GNRMC message, and return true on detecting EOL.
 
+bool getgps() {
+  char c;
+  while (GPSSerial.available()) {
+    c = GPSSerial.read();
+    Serial.print(c);
+    if (gps.encode(c)) {
+      return true;
+    }
+    // LM -
+    if (c == EOL)
+      return true;
+    if (c == '$') {
+      tmpMsg = c;
+    } else if (tmpMsg.length() > 0 && tmpMsg.length() < 80) {
+      tmpMsg += c;
+    }
+  }
+  return false;
+}
+
 const uint8_t daysInMonth[] PROGMEM = {
     31, 28, 31, 30, 31, 30,
     31, 31, 30, 31, 30, 31}; // const or compiler complains
@@ -475,38 +508,69 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
 
 boolean getGPSdata() {
   long startTime = millis();
-  uint16_t timeout = 5000;
-  for (int i = 0; i < 2; i++) {
-    do {
-      while (GPSSerial.available()) {
-        char r = GPSSerial.read();
-        Serial.write(r);
-        gps.encode(r);
+  bool validDataReceived = false;
+  const long TIMEOUT = 5000;
+  while (millis() < startTime + TIMEOUT) {
+    if (getgps()) {
+      gnrmcMsg = tmpMsg;
+      Serial.println(gnrmcMsg);
+      // $GNRMC message length is 67, including EOL - Ensure full length
+      // message
+      Serial.print("Message length: ");
+      Serial.println(gnrmcMsg.length());
+      // support the length being slightly different
+      if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
+        sUTC = gnrmcMsg.substring(7, 13);
+        sUTD = gnrmcMsg.substring(53, 59);
+        crack(sUTD, sUTC);
+        tmpMsg = "";
+        validDataReceived = true;
+        Serial.println("Screaming Success!");
+        break;
       }
-    } while (millis() - startTime < timeout && !gps.time.isValid());
-    yield();
-  };
-  return gps.time.isValid();
+    }
+  }
+
+  Serial.println(validDataReceived ? "GPS data retrieval complete."
+                                   : "GPS data retrieval EPIC FAIL");
+  return validDataReceived;
+}
+
+// My message utilities
+
+void crack(String sDate, String sTime) {
+  // sDate = ddmmyy
+  // sTime = hhmmss
+  // hundredths = 00
+  year = sDate.substring(4).toInt() + CENTURY;
+  month = sDate.substring(2, 4).toInt();
+  day = sDate.substring(0, 2).toInt();
+  hour = sTime.substring(0, 2).toInt();
+  minute = sTime.substring(2, 4).toInt();
+  second = sTime.substring(4).toInt();
+  hundredths = 0; // LM: GPS time is always acquired on the second (not used)
+  age = 0;        //     Not used in this adaptation
 }
 
 // RTC support
 
 void updateRTC() { // From GPS
-  if (!getGPSdata())
+  bool dataValid = false;
+  for (int i = 0; i < 2; i++) {
+    if (getGPSdata()) {
+      dataValid = true;
+      break;
+    }
+  }
+  if (!dataValid) {
+    Serial.println("GPS data retrieval failed.");
     return;
-  auto time = gps.time;
-  auto date = gps.date;
-  year = date.year();
-  month = date.month();
-  day = date.day();
-  hour = time.hour();
-  minute = time.minute();
-  second = time.second();
+  }
+
   DateTime ut(year, month, day, hour, minute, second);
   rtc.adjust(ut);
-#if MYDEBUG
-  Serial.println("RTC updated.");
-#endif
+  if (MYDEBUG)
+    Serial.println("RTC updated.");
   lastGPSsync =
       millis(); // For subsequent updates (and milliseconds computation)
 }
