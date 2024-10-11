@@ -15,6 +15,7 @@
  *
  */
 
+#include "ulog.h"
 #include <Arduino.h>
 #include <ETHClass2.h>
 #include <RTClib.h>
@@ -94,9 +95,6 @@ int milliseconds;
 uint32_t fractionalSecond;
 #define MAXUINT32 4294967295. // i.e. (float) 2^32 - 1
 
-// LM: Alternative debug (Replaces #define)
-#define MYDEBUG true
-
 static bool eth_connected = false;
 
 char daysOfTheWeek[7][12] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
@@ -115,36 +113,36 @@ bool getgps();
 void displayTime();
 String formatMS(int ms);
 
+void console_logger(ulog_level_t severity, char *msg) {
+  Serial.printf("[%s]: %s\n", ulog_level_name(severity), msg);
+}
+
+// Ran on ETHERNET events, pardon the naming.
+// the ETHClass2 library is based on the Wifi library...
 void WiFiEvent(arduino_event_id_t event) {
   switch (event) {
   case ARDUINO_EVENT_ETH_START:
-    Serial.println("ETH Started");
+    ULOG_INFO("ETH Started");
     // set eth hostname here
     ETH.setHostname("esp32-ethernet");
     break;
   case ARDUINO_EVENT_ETH_CONNECTED:
-    Serial.println("ETH Connected");
+    ULOG_INFO("ETH Connected");
     break;
   case ARDUINO_EVENT_ETH_GOT_IP:
-    Serial.print("ETH MAC: ");
-    Serial.print(ETH.macAddress());
-    Serial.print(", IPv4: ");
-    Serial.print(ETH.localIP());
-    if (ETH.fullDuplex()) {
-      Serial.print(", FULL_DUPLEX");
-    }
+    ULOG_INFO("ETH MAC: %s, IPv4: %s, %s, %uMbps", ETH.macAddress().c_str(),
+              ETH.localIP().toString().c_str(),
+              ETH.fullDuplex() ? "FULL_DUPLEX" : "HALF_DUPLEX",
+              ETH.linkSpeed());
 
-    Serial.print(", ");
-    Serial.print(ETH.linkSpeed());
-    Serial.println("Mbps");
     eth_connected = true;
     break;
   case ARDUINO_EVENT_ETH_DISCONNECTED:
-    Serial.println("ETH Disconnected");
+    ULOG_INFO("ETH Disconnected");
     eth_connected = false;
     break;
   case ARDUINO_EVENT_ETH_STOP:
-    Serial.println("ETH Stopped");
+    ULOG_INFO("ETH Stopped");
     eth_connected = false;
     break;
   default:
@@ -164,11 +162,9 @@ void nemaMsgSend(const char *msg) {
   char checksum[8];
   snprintf(checksum, sizeof(checksum) - 1, "*%.2X", calculateChecksum(msg));
   GPSSerial.print("$");
-  Serial.print("$");
   GPSSerial.print(msg);
-  Serial.print(msg);
   GPSSerial.println(checksum);
-  Serial.println(checksum);
+  ULOG_DEBUG("$%s%s", msg, checksum);
 }
 
 int nemaMsgDisable(const char *nema) {
@@ -199,16 +195,23 @@ void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
 
-  while (millis() < 1000 && !Serial.availableForWrite()) {
-    Serial.println("Waiting for Serial Monitor...");
+  ULOG_INIT();
+
+  while (millis() < 1000 && !Serial) {
     delay(500);
   } // wait for Arduino Serial Monitor
+
+#ifdef LOGGER_LEVEL
+  ULOG_SUBSCRIBE(console_logger, LOGGER_LEVEL);
+#else
+  ULOG_SUBSCRIBE(console_logger, ULOG_INFO_LEVEL);
+#endif // LOGGER_LEVEL
 
   WiFi.onEvent(WiFiEvent);
 
   while (millis() < 5000 && gps.charsProcessed() < 60 &&
          !GPSSerial.availableForWrite()) {
-    Serial.println("Waiting for GPS Serial Monitor...");
+    ULOG_INFO("Waiting for GPS Serial Monitor...");
     // getgps();
     delay(500);
   } // wait for GPS Serial Monitor
@@ -216,15 +219,12 @@ void setup() {
   // start Ethernet and UDP:
   if (!ETH.begin(ETH_TYPE, ETH_ADDR, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_RESET_PIN,
                  ETH_CLK_MODE)) {
-    Serial.println("ETH start Failed!");
+    ULOG_ERROR("ETH start Failed!");
   }
 
   udp.begin(NTP_PORT);
 
-  if (MYDEBUG) {
-    Serial.print("Version:");
-    Serial.println(vers);
-  }
+  ULOG_INFO("Version: %s", std::string(vers).c_str());
 
   // Disable everything but $GPRMC
   nemaMsgDisable("GLL");
@@ -238,13 +238,13 @@ void setup() {
 
   if (rtc.begin(&Wire1)) {
     rtcON = true;
-    Serial.println("RTC is connected!");
+    ULOG_INFO("RTC is connected!");
   } else {
-    Serial.println("Couldn't find RTC");
+    ULOG_INFO("Couldn't find RTC");
   }
 
-  if (rtcON && MYDEBUG) {
-    Serial.print("Real-time clock (before startup sync): ");
+  if (rtcON && ULOG_ENABLED) {
+    ULOG_DEBUG("Real-time clock (before startup sync): ");
     readRTC();
     displayTime();
   }
@@ -259,21 +259,12 @@ void setup() {
     displayTime();
   };
 
-  if (rtcON && MYDEBUG) {
-    Serial.print("Real-time clock (after startup sync): ");
+  if (rtcON && ULOG_ENABLED) {
+    ULOG_INFO("Real-time clock (after startup sync): ");
     readRTC();
     displayTime();
-    Serial.println();
   }
 }
-
-/*
-  NTP Time Server:
-
- This code is in the public domain.
- */
-
-////////////////////////////////////////
 
 void loop() { // Original loop received data from GPS continuously (i.e. per
               // second) and called processNTP() when valid data were received
@@ -288,16 +279,14 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     processNTP();
   }
   if (rtcUpdateDue()) {
-    if (MYDEBUG)
-      Serial.println("Attempting to update RTC..");
+    ULOG_DEBUG("Attempting to update RTC..");
 
     updateRTC();
 
-    if (MYDEBUG) {
-      Serial.println("Updated RTC time.");
+    if (ULOG_ENABLED) {
+      ULOG_INFO("Updated RTC time.");
       readRTC();
       displayTime();
-      Serial.println();
     }
   }
 }
@@ -427,7 +416,7 @@ void processNTP() {
     udp.beginPacket(Remote, PortNum);
     udp.write(packetBuffer, NTP_PACKET_SIZE);
     udp.endPacket();
-    if (MYDEBUG)
+    if (ULOG_ENABLED)
       displayTime();
   }
 }
@@ -513,11 +502,10 @@ boolean getGPSdata() {
   while (millis() < startTime + TIMEOUT) {
     if (getgps()) {
       gnrmcMsg = tmpMsg;
-      Serial.println(gnrmcMsg);
+      ULOG_INFO(gnrmcMsg.c_str());
       // $GNRMC message length is 67, including EOL - Ensure full length
       // message
-      Serial.print("Message length: ");
-      Serial.println(gnrmcMsg.length());
+      ULOG_INFO("gnrmcMsg length: %i", gnrmcMsg.length());
       // support the length being slightly different
       if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
         sUTC = gnrmcMsg.substring(7, 13);
@@ -525,14 +513,14 @@ boolean getGPSdata() {
         crack(sUTD, sUTC);
         tmpMsg = "";
         validDataReceived = true;
-        Serial.println("Screaming Success!");
+        ULOG_INFO("Screaming Success!");
         break;
       }
     }
   }
 
-  Serial.println(validDataReceived ? "GPS data retrieval complete."
-                                   : "GPS data retrieval EPIC FAIL");
+  ULOG_INFO(validDataReceived ? "GPS data retrieval complete."
+                              : "GPS data retrieval EPIC FAIL");
   return validDataReceived;
 }
 
@@ -563,14 +551,13 @@ void updateRTC() { // From GPS
     }
   }
   if (!dataValid) {
-    Serial.println("GPS data retrieval failed.");
+    ULOG_INFO("GPS data retrieval failed.");
     return;
   }
 
   DateTime ut(year, month, day, hour, minute, second);
   rtc.adjust(ut);
-  if (MYDEBUG)
-    Serial.println("RTC updated.");
+  ULOG_DEBUG("RTC updated.");
   lastGPSsync =
       millis(); // For subsequent updates (and milliseconds computation)
 }
@@ -614,27 +601,28 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
 // My debug
 
 void displayTime() {
-  Serial.print(month);
-  Serial.print("/");
-  Serial.print(day);
-  Serial.print("/");
-  Serial.print(year);
-  Serial.print("  ");
-  Serial.print(hour);
-  Serial.print(":");
-  Serial.print(formatMS(minute));
-  Serial.print(":");
-  Serial.print(formatMS(second));
-  Serial.print(".");
+  std::string buffer;
+  buffer.append(String(month).c_str());
+  buffer += "/";
+  buffer.append(String(day).c_str());
+  buffer += "/";
+  buffer.append(String(year).c_str());
+  buffer += "  ";
+  buffer.append(String(hour).c_str());
+  buffer += ":";
+  buffer.append(formatMS(minute).c_str());
+  buffer += ":";
+  buffer.append(formatMS(second).c_str());
+  buffer += ".";
   String sMS = String(milliseconds);
   while (sMS.length() < 3) {
     sMS = "0" + sMS;
   }
-  Serial.print(sMS);
-  Serial.print("  [");
-  Serial.print(fractionalSecond);
-  Serial.print("/(2^32 - 1)]");
-  Serial.println();
+  buffer.append(sMS.c_str());
+  buffer.append("  [");
+  buffer.append(String(fractionalSecond).c_str());
+  buffer.append("/(2^32 - 1)]");
+  ULOG_INFO(buffer.c_str());
 }
 
 String formatMS(int ms) {
