@@ -305,13 +305,12 @@ void processNTP() {
     packetBuffer[0] = 0b00100100; // LI, Version, Mode
     // Have to spoof stratum 1 because Galleon test client interprets stratum 2
     // ID as a date/time (not IP)
-    packetBuffer[1] = 2; // stratum (GPS)
-                         //  packetBuffer[1] = 2 ;   // stratum (RTC)
-    packetBuffer[2] = 6; // polling minimum (64 seconds - default)
-    //  packetBuffer[3] = 0xFA; // precision (reference sketch - ~15
-    //  milliseconds)
+    packetBuffer[1] = 2;    // stratum (GPS)
+                            //  packetBuffer[1] = 2 ;   // stratum (RTC)
+    packetBuffer[2] = 6;    // polling minimum (64 seconds - default)
+    packetBuffer[3] = 0xFA; // precision (reference sketch - ~15 milliseconds)
     packetBuffer[3] = 0xF7; // precision (2^-9 ~2 milliseconds)
-    //  packetBuffer[3] = 0x09; // precision (2^9 Testing)
+    packetBuffer[3] = 0x09; // precision (2^9 Testing)
 
     packetBuffer[7] = 0; // root delay
     packetBuffer[8] = 0;
@@ -341,17 +340,15 @@ void processNTP() {
     // Reference timestamp
     tempval = timestamp;
     packetBuffer[16] = (tempval >> 24) & 0XFF;
-    tempval = timestamp;
     packetBuffer[17] = (tempval >> 16) & 0xFF;
-    tempval = timestamp;
     packetBuffer[18] = (tempval >> 8) & 0xFF;
-    tempval = timestamp;
     packetBuffer[19] = (tempval) & 0xFF;
 
-    packetBuffer[20] = 0;
-    packetBuffer[21] = 0;
-    packetBuffer[22] = 0;
-    packetBuffer[23] = 0;
+    tempval = fractionalSecond;
+    packetBuffer[20] = (tempval >> 24) & 0xFF;
+    packetBuffer[21] = (tempval >> 16) & 0xFF;
+    packetBuffer[22] = (tempval >> 8) & 0xFF;
+    packetBuffer[23] = (tempval) & 0xFF;
 
     // Originate timestamp from incoming UDP transmit timestamp
     packetBuffer[24] = packetBuffer[40];
@@ -373,12 +370,17 @@ void processNTP() {
     tempval = timestamp;
     packetBuffer[35] = (tempval) & 0xFF;
 
-    packetBuffer[36] = 0;
-    packetBuffer[37] = 0;
-    packetBuffer[38] = 0;
-    packetBuffer[39] = 0;
+    tempval = fractionalSecond;
+    packetBuffer[36] = (tempval >> 24) & 0xFF;
+    tempval = fractionalSecond;
+    packetBuffer[37] = (tempval >> 16) & 0xFF;
+    tempval = fractionalSecond;
+    packetBuffer[38] = (tempval >> 8) & 0xFF;
+    tempval = fractionalSecond;
+    packetBuffer[39] = (tempval) & 0xFF;
 
     // Transmit timestamp
+    tempval = timestamp;
     packetBuffer[40] = (tempval >> 24) & 0XFF;
     tempval = timestamp;
     packetBuffer[41] = (tempval >> 16) & 0xFF;
@@ -387,27 +389,22 @@ void processNTP() {
     tempval = timestamp;
     packetBuffer[43] = (tempval) & 0xFF;
 
-#if FOR_WINDOWS
     // LM: Fractional second - Use 0 with Windows client until issue resolved
-    packetBuffer[44] = 0;
-    packetBuffer[45] = 0;
-    packetBuffer[46] = 0;
-    packetBuffer[47] = 0;
-#else
+    // packetBuffer[44] = 0;
+    // packetBuffer[45] = 0;
+    // packetBuffer[46] = 0;
+    // packetBuffer[47] = 0;
     // LM: Fractional second - Test NTP clients accept the following, but
     // Windows does not
     tempval = fractionalSecond;
     packetBuffer[44] = (tempval >> 24) & 0xFF;
     tempval = fractionalSecond;
     packetBuffer[45] = (tempval >> 16) & 0xFF;
-    ;
     tempval = fractionalSecond;
     packetBuffer[46] = (tempval >> 8) & 0xFF;
-    ;
     tempval = fractionalSecond;
     packetBuffer[47] = (tempval) & 0xFF;
-    ;
-#endif
+    // ;
 
     // Omit optional fields
 
@@ -416,8 +413,9 @@ void processNTP() {
     udp.beginPacket(Remote, PortNum);
     udp.write(packetBuffer, NTP_PACKET_SIZE);
     udp.endPacket();
-    if (ULOG_ENABLED)
-      displayTime();
+    udp.flush();
+    //   if (ULOG_ENABLED)
+    //     displayTime();
   }
 }
 
@@ -541,7 +539,6 @@ void crack(String sDate, String sTime) {
 }
 
 // RTC support
-
 void updateRTC() { // From GPS
   bool dataValid = false;
   for (int i = 0; i < 2; i++) {
