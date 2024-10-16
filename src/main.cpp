@@ -31,9 +31,6 @@
 #define ETH_MDC_PIN 23
 #define ETH_MDIO_PIN 18
 
-#define FOR_WINDOWS                                                            \
-  false // true if the NTP client is Windows w32tm
-        // Omit (true) or include (false) fractional seconds
 #define vers "NTP GPS V02A (Rev.RTC)"
 
 // PINS
@@ -67,7 +64,8 @@ TinyGPSPlus gps;
 int year;
 byte month, day, hour, minute, second, hundredths;
 unsigned long age;
-uint32_t timestamp, tempval;
+volatile uint32_t timestamp, ppsTimestamp;
+uint32_t tempval;
 
 ////////////////////////////////////////
 
@@ -92,6 +90,9 @@ long updateInterval = 3600000;
 // https://arduino.stackexchange.com/questions/49567/synching-local-clock-usign-ntp-to-milliseconds
 // Do it backwards (milliseconds to fractional second)
 int milliseconds;
+volatile int startofSec = 0;
+volatile bool unprocessedPulse =
+    true; // gets set to the timestamp of the pulse.
 uint32_t fractionalSecond;
 #define MAXUINT32 4294967295. // i.e. (float) 2^32 - 1
 
@@ -191,6 +192,13 @@ int nemaMsgEnable(const char *nema) {
   return 1;
 }
 
+void syncToPPS() {
+  startofSec = millis();
+  unprocessedPulse = true;
+  ppsTimestamp = timestamp + 1;
+  timestamp++;
+}
+
 void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
@@ -264,6 +272,8 @@ void setup() {
     readRTC();
     displayTime();
   }
+
+  attachInterrupt(GPS_PPS_PIN, syncToPPS, RISING);
 }
 
 void loop() { // Original loop received data from GPS continuously (i.e. per
@@ -275,6 +285,12 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
   while (GPSSerial.available()) {
     GPSSerial.read();
   }
+
+  if (unprocessedPulse) {
+    readRTC();
+    unprocessedPulse = false;
+  }
+
   if (eth_connected) {
     processNTP();
   }
@@ -305,7 +321,7 @@ void processNTP() {
     packetBuffer[0] = 0b00100100; // LI, Version, Mode
     // Have to spoof stratum 1 because Galleon test client interprets stratum 2
     // ID as a date/time (not IP)
-    packetBuffer[1] = 2;    // stratum (GPS)
+    packetBuffer[1] = 1;    // stratum (GPS)
                             //  packetBuffer[1] = 2 ;   // stratum (RTC)
     packetBuffer[2] = 6;    // polling minimum (64 seconds - default)
     packetBuffer[3] = 0xFA; // precision (reference sketch - ~15 milliseconds)
@@ -389,11 +405,6 @@ void processNTP() {
     tempval = timestamp;
     packetBuffer[43] = (tempval) & 0xFF;
 
-    // LM: Fractional second - Use 0 with Windows client until issue resolved
-    // packetBuffer[44] = 0;
-    // packetBuffer[45] = 0;
-    // packetBuffer[46] = 0;
-    // packetBuffer[47] = 0;
     // LM: Fractional second - Test NTP clients accept the following, but
     // Windows does not
     tempval = fractionalSecond;
@@ -561,10 +572,10 @@ void updateRTC() { // From GPS
 
 boolean rtcUpdateDue() { // Convenience test
   if (rtcON) {
-    if (lastGPSsync + updateInterval < millis())
-      return true;
     if (millis() < lastGPSsync)
       return true; // Arduino millis() rollover
+    if (lastGPSsync + updateInterval < millis())
+      return true;
   }
   return false;
 }
@@ -580,17 +591,22 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
   // ouch! RTC is synched to GPS at least hourly. Arduino's millisecond counter
   // is good for that range.
-  long delta = millis() - lastGPSsync;
+  long delta = millis() - startofSec;
   // To do: Handle rollover rigorously - Next is placeholder
   //        Or power-cycle the Arduino occasionally (before 50 days)
+  timestamp = rtcNow.unixtime() + seventyYears; // 1900 Epoch
+  if (ppsTimestamp - timestamp == 1) {
+    // don't change the timestamp if the PPS timestamp is in the future by just
+    // one second
+    timestamp = ppsTimestamp;
+  }
   if (delta < 0) { // Rollover has occurred
                    // Constant below is 2^32 - 1
-    delta = millis() + (4294967295 - lastGPSsync);
+    delta = millis() + (4294967295 - startofSec);
   }
   milliseconds = delta % 1000;
   // I can't see where hundredths were used in the reference sketch
   hundredths = milliseconds / 10;
-  timestamp = rtcNow.unixtime() + seventyYears; // 1900 Epoch
   // Compute fractional seconds
   fractionalSecond = ((double)milliseconds / 1000.) * MAXUINT32;
 }
