@@ -61,9 +61,6 @@ WiFiUDP udp;
 // GPS instance
 TinyGPSPlus gps;
 
-int year;
-byte month, day, hour, minute, second, hundredths;
-unsigned long age;
 volatile uint32_t timestamp, ppsTimestamp;
 uint32_t tempval;
 
@@ -106,7 +103,7 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t d, uint8_t h,
                                                        uint8_t mm, uint8_t s);
 boolean getGPSdata();
-void crack(String sDate, String sTime);
+DateTime crack(String sDate, String sTime);
 void updateRTC();
 boolean rtcUpdateDue();
 void readRTC();
@@ -519,7 +516,7 @@ boolean getGPSdata() {
       if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
         sUTC = gnrmcMsg.substring(7, 13);
         sUTD = gnrmcMsg.substring(53, 59);
-        crack(sUTD, sUTC);
+        timestamp = crack(sUTD, sUTC).unixtime();
         tmpMsg = "";
         validDataReceived = true;
         ULOG_INFO("Screaming Success!");
@@ -535,20 +532,14 @@ boolean getGPSdata() {
 
 // My message utilities
 
-void crack(String sDate, String sTime) {
+DateTime crack(String sDate, String sTime) {
   // sDate = ddmmyy
   // sTime = hhmmss
-  // hundredths = 00
-  year = sDate.substring(4).toInt() + CENTURY;
-  month = sDate.substring(2, 4).toInt();
-  day = sDate.substring(0, 2).toInt();
-  hour = sTime.substring(0, 2).toInt();
-  minute = sTime.substring(2, 4).toInt();
-  second = sTime.substring(4).toInt();
-  hundredths = 0; // LM: GPS time is always acquired on the second (not used)
-  age = 0;        //     Not used in this adaptation
+  return DateTime(sDate.substring(4).toInt() + CENTURY,
+                  sDate.substring(2, 4).toInt(), sDate.substring(0, 2).toInt(),
+                  sTime.substring(0, 2).toInt(), sTime.substring(2, 4).toInt(),
+                  sTime.substring(4).toInt());
 }
-
 // RTC support
 void updateRTC() { // From GPS
   bool dataValid = false;
@@ -563,7 +554,7 @@ void updateRTC() { // From GPS
     return;
   }
 
-  DateTime ut(year, month, day, hour, minute, second);
+  DateTime ut = DateTime(timestamp);
   rtc.adjust(ut);
   ULOG_DEBUG("RTC updated.");
   lastGPSsync =
@@ -582,12 +573,6 @@ boolean rtcUpdateDue() { // Convenience test
 
 void readRTC() { // Read time from RTC in same format as GPS crack()
   rtcNow = rtc.now();
-  year = rtcNow.year();
-  month = rtcNow.month();
-  day = rtcNow.day();
-  hour = rtcNow.hour();
-  minute = rtcNow.minute();
-  second = rtcNow.second();
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
   // ouch! RTC is synched to GPS at least hourly. Arduino's millisecond counter
   // is good for that range.
@@ -605,8 +590,6 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
     delta = millis() + (4294967295 - startofSec);
   }
   milliseconds = delta % 1000;
-  // I can't see where hundredths were used in the reference sketch
-  hundredths = milliseconds / 10;
   // Compute fractional seconds
   fractionalSecond = ((double)milliseconds / 1000.) * MAXUINT32;
 }
@@ -615,17 +598,18 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
 
 void displayTime() {
   std::string buffer;
-  buffer.append(String(month).c_str());
+  const DateTime now = DateTime(timestamp - seventyYears);
+  buffer.append(String(now.month()).c_str());
   buffer += "/";
-  buffer.append(String(day).c_str());
+  buffer.append(formatMS(now.day()).c_str());
   buffer += "/";
-  buffer.append(String(year).c_str());
+  buffer.append(String(now.year()).c_str());
   buffer += "  ";
-  buffer.append(String(hour).c_str());
+  buffer.append(String(now.hour()).c_str());
   buffer += ":";
-  buffer.append(formatMS(minute).c_str());
+  buffer.append(formatMS(now.minute()).c_str());
   buffer += ":";
-  buffer.append(formatMS(second).c_str());
+  buffer.append(formatMS(now.second()).c_str());
   buffer += ".";
   String sMS = String(milliseconds);
   while (sMS.length() < 3) {
