@@ -44,7 +44,7 @@ HardwareSerial GPSSerial(2);
 // Time Server Port according to the standard
 #define NTP_PORT 123
 
-short rtcOffset = 0; // RTC offset in milliseconds
+short rtcOffset = 4; // RTC offset in milliseconds
 // Size of a version 4 NTP packet
 static const int NTP_PACKET_SIZE = 48;
 // buffers for receiving and sending data
@@ -81,9 +81,14 @@ long updateInterval = 3600000;
 
 // current timestamp from the source that we've last read
 volatile uint32_t timestamp;
+// last time we got an update from our GPS source.
+uint32_t referenceTimestamp;
 // set to millis() when the last PPS pulse was received
 volatile uint32_t startofSec = 0;
 volatile uint32_t startofRTCSec = 0;
+// if the source is present and active
+volatile bool gpsActive = false;
+bool gpsNeedsSettings = true;
 
 uint32_t tempval;
 
@@ -97,10 +102,19 @@ int milliseconds;
 uint32_t fractionalSecond;
 #define MAXUINT32 4294967295. // i.e. (float) 2^32 - 1
 
+const uint8_t daysInMonth[] PROGMEM = {
+    31, 28, 31, 30, 31, 30,
+    31, 31, 30, 31, 30, 31}; // const or compiler complains
+
+const unsigned long seventyYears =
+    2208988800UL; // 1970 - 1900 in seconds (Unix to Epoch)
+
 // Ethernet
 
 // Flag indicating whether the ethernet is connected
 static bool eth_connected = false;
+
+enum class Source { GPS, RTC };
 
 // Function prototypes
 
@@ -113,7 +127,7 @@ boolean getGPSdata(bool allowBlocking = true);
 DateTime getTimefromString(String sDate, String sTime);
 bool updateRTC(bool allowBlocking);
 boolean rtcUpdateDue();
-void readRTC();
+Source readTime();
 bool getgps();
 void displayTime();
 String formatMS(int ms);
@@ -125,6 +139,7 @@ int nemaMsgEnable(const char *nema);
 
 void syncToPPS();
 void syncToRTCPPS();
+void setGPSSettings();
 void setRTCSettings();
 // logging
 
@@ -167,12 +182,7 @@ void setup() {
 
   ULOG_INFO("Version: %s", std::string(vers).c_str());
 
-  // Disable everything but $GPRMC
-  nemaMsgDisable("GLL");
-  nemaMsgDisable("VTG");
-  nemaMsgDisable("GSV");
-  nemaMsgDisable("GGA");
-  nemaMsgDisable("GSA");
+  setGPSSettings();
 
   Wire1.begin(RTC_SDA_PIN, RTC_SCL_PIN);
   delay(250);
@@ -192,7 +202,7 @@ void setup() {
   if (rtcON) {
     if (ULOG_ENABLED) {
       ULOG_DEBUG("Real-time clock (before startup sync): ");
-      readRTC();
+      readTime();
       displayTime();
     }
     delay(3000);
@@ -208,7 +218,7 @@ void setup() {
         ULOG_ERROR("RTC update failed.");
       } else {
         ULOG_INFO("Real-time clock (after startup sync): ");
-        readRTC();
+        readTime();
         displayTime();
       }
     }
@@ -256,6 +266,15 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     // empty the serial buffer
     while (GPSSerial.available()) {
       GPSSerial.read();
+    }
+    if (gpsActive && millis() - startofSec > 2000) {
+      gpsActive = false;
+      ULOG_WARNING("GPS signal lost.");
+      gpsNeedsSettings = true;
+    }
+    if (gpsActive && millis() - startofSec < 1000 && gpsNeedsSettings) {
+      setGPSSettings();
+      gpsNeedsSettings = false;
     }
   }
 }
@@ -336,6 +355,21 @@ int nemaMsgEnable(const char *nema) {
   return 1;
 }
 
+void setGPSSettings() {
+  if (!gpsNeedsSettings) {
+    return;
+  }
+  // Disable everything but $GPRMC
+  nemaMsgDisable("GLL");
+  nemaMsgDisable("VTG");
+  nemaMsgDisable("GSV");
+  nemaMsgDisable("GGA");
+  nemaMsgDisable("GSA");
+  // enable only $GPRMC
+  nemaMsgEnable("RMC");
+  gpsNeedsSettings = false;
+}
+
 void setRTCSettings() {
   // must be ran after the RTC clock loses power
   // set the RTC to output a 1Hz signal on the SQW pin
@@ -345,7 +379,10 @@ void setRTCSettings() {
 
 // PPS processing
 
-void syncToPPS() { startofSec = millis(); }
+void syncToPPS() {
+  startofSec = millis();
+  gpsActive = true;
+}
 
 void syncToRTCPPS() { startofRTCSec = millis(); }
 
@@ -362,44 +399,44 @@ void processNTP() {
 
     packetBuffer[0] = 0b00100100; // LI, Version, Mode
 
-    packetBuffer[1] = 1;    // stratum (GPS)
-                            //  packetBuffer[1] = 2 ;   // stratum (RTC)
+    packetBuffer[1] = 1; // we're always stratum 1 even if we're on the RTC.
+
     packetBuffer[2] = 6;    // polling minimum (64 seconds - default)
     packetBuffer[3] = 0xF7; // precision (2^-9 ~2 milliseconds)
 
-    packetBuffer[7] = 0; // root delay
-    packetBuffer[8] = 0;
+    packetBuffer[4] = 0; // root delay
+    packetBuffer[5] = 0;
+    packetBuffer[6] = 0;
+    packetBuffer[7] = 0;
+
+    packetBuffer[8] = 0; // root dispersion
     packetBuffer[9] = 8;
     packetBuffer[10] = 0;
+    packetBuffer[11] = 0;
 
-    packetBuffer[11] = 0; // root dispersion
-    packetBuffer[12] = 0;
-    packetBuffer[13] = 0xC;
-    packetBuffer[14] = 0;
-
-    readRTC(); // Assume succeeds
-    // readRTC() has cracked date/time and timestamp
+    readTime(); // Assume succeeds
+    // readTime() has cracked date/time and timestamp
     // No additional parsing required here
 
-    // Reference identifier (for Stratum 1 type)
-    packetBuffer[12] = 71; //"G";
-    packetBuffer[13] = 80; //"P";
-    packetBuffer[14] = 83; //"S";
-    packetBuffer[15] = 0;  //" ";
-
-    // packetBuffer[12] = 80; //"P";
-    // packetBuffer[13] = 80; //"P";
-    // packetBuffer[14] = 83; //"S";
-    // packetBuffer[15] = 0;  //" ";
-
+    if (gpsActive) {
+      packetBuffer[12] = 71;  //"G";
+      packetBuffer[13] = 80;  //"P";
+      packetBuffer[14] = 83;  //"S";
+      packetBuffer[15] = 115; //"s";
+    } else {
+      packetBuffer[12] = 80; //"P";
+      packetBuffer[13] = 80; //"P";
+      packetBuffer[14] = 83; //"S";
+      packetBuffer[15] = 0;  //" ";
+    }
     // Reference timestamp
-    tempval = timestamp;
+    tempval = referenceTimestamp + seventyYears;
     packetBuffer[16] = (tempval >> 24) & 0XFF;
     packetBuffer[17] = (tempval >> 16) & 0xFF;
     packetBuffer[18] = (tempval >> 8) & 0xFF;
     packetBuffer[19] = (tempval) & 0xFF;
 
-    tempval = fractionalSecond;
+    tempval = 0;
     packetBuffer[20] = (tempval >> 24) & 0xFF;
     packetBuffer[21] = (tempval >> 16) & 0xFF;
     packetBuffer[22] = (tempval >> 8) & 0xFF;
@@ -416,7 +453,7 @@ void processNTP() {
     packetBuffer[31] = packetBuffer[47];
 
     // Receive timestamp
-    tempval = timestamp; // Same as reference timestamp
+    tempval = timestamp; // when we received this packet and its timestamp
     packetBuffer[32] = (tempval >> 24) & 0XFF;
     packetBuffer[33] = (tempval >> 16) & 0xFF;
     packetBuffer[34] = (tempval >> 8) & 0xFF;
@@ -489,13 +526,6 @@ bool getgps() {
   return false;
 }
 
-const uint8_t daysInMonth[] PROGMEM = {
-    31, 28, 31, 30, 31, 30,
-    31, 31, 30, 31, 30, 31}; // const or compiler complains
-
-const unsigned long seventyYears =
-    2208988800UL; // 1970 - 1900 in seconds (Unix to Epoch)
-
 // NTP since 1900/01/01
 static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t d, uint8_t h,
@@ -549,6 +579,7 @@ boolean getGPSdata(boolean allowBlocking) {
         sUTC = gnrmcMsg.substring(7, 13);
         sUTD = gnrmcMsg.substring(53, 59);
         timestamp = getTimefromString(sUTD, sUTC).unixtime();
+        referenceTimestamp = timestamp;
         tmpMsg = "";
         validDataReceived = true;
         ULOG_INFO("Screaming Success!");
@@ -603,6 +634,8 @@ bool updateRTC(bool allowBlocking) { // From GPS
 
 boolean rtcUpdateDue() { // Convenience test
   if (rtcON) {
+    if (lastGPSsync == 0)
+      return true;
     if (millis() < lastGPSsync)
       return true; // Arduino millis() rollover
     if (lastGPSsync + updateInterval < millis())
@@ -613,29 +646,41 @@ boolean rtcUpdateDue() { // Convenience test
   return false;
 }
 
-void readRTC() { // Read time from RTC in same format as GPS crack()
+Source readTime() { // Read time from RTC or GPS
   rtcNow = rtc.now();
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
   // ouch! RTC is synched to GPS at least hourly. Arduino's millisecond counter
   // is good for that range.
-  long delta = millis() - startofRTCSec + rtcOffset;
+  uint_fast32_t secStart;
+  Source source;
+  long delta;
+  if (gpsActive) {
+    secStart = startofSec;
+    source = Source::GPS;
+    delta = millis() - secStart;
+  } else {
+    secStart = startofRTCSec;
+    source = Source::RTC;
+    delta = millis() - secStart + rtcOffset;
+  };
   // To do: Handle rollover rigorously - Next is placeholder
   //        Or power-cycle the Arduino occasionally (before 50 days)
   timestamp = rtcNow.unixtime() + seventyYears; // 1900 Epoch
   if (delta < 0) {                              // Rollover has occurred, maybe
 
-    if (delta + rtcOffset >= rtcOffset / 2) {
+    if (source == Source::RTC && delta + rtcOffset >= rtcOffset / 2) {
       // its likely not a rollover but the offset is poor
-      timestamp--;
       delta = 1000 + delta;
     } else {
       // Constant below is 2^32 - 1
-      delta = millis() + (4294967295 - startofRTCSec) + rtcOffset;
+      delta = millis() + (4294967295 - secStart) +
+              (source == Source::RTC ? rtcOffset : 0);
     }
   }
   milliseconds = delta % 1000;
   // Compute fractional seconds
   fractionalSecond = ((double)milliseconds / 1000.) * MAXUINT32;
+  return source;
 }
 
 // My debug
