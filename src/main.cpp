@@ -1,37 +1,30 @@
-/* LM: The following is based on NTP_Server_01.ino, downloaded from:
- *     https://forum.arduino.cc/index.php?topic=197870.0
+/* The following is based on https://lloydm.net/Demos/GPS-NTP.html
+ *  which itself was based on NTP_Server_01.ino, downloaded from
+ * https://forum.arduino.cc/index.php?topic=197870.0
  *
- *     Original source is named NTP_Server_01.
- *     This sketch includes modifications as summarized below.
- *
- *                LM:   GPS disciplined real-time clock adaptation
- *                      ------------------------------------------
- *     Modifications:   Update RTC from GPS and satisfy NTP requests from RTC
- *                      Platform Arduion Uno + u-blox NEO-M8N
- *                      GPS com via _software_ serial (D5 and D6)
- *                      Fix leap year bug for year > 1970
- *                      Substitute date/time crack() function for GPS library
- * method Minor trivial changes
- *
+ * This project includes further modifications in order to support
+ * the ESP32 and ethernet libraries from LilyGo. In particular, this code is
+ * running on a T-Internet-POE board from LilyGo.
  */
 
 #include "ulog.h"
 #include <Arduino.h>
 #include <ETHClass2.h>
 #include <RTClib.h>
-#include <SPI.h> // needed for Arduino versions later than 0018
 #include <TinyGPS++.h>
 
+#define vers "NTP GPS V02A (Rev.RTC)"
+
+// required for ETHClass2
 #define ETH ETH2
 
+// pins for the ethernet port on the T-Internet-POE
 #define ETH_CLK_MODE ETH_CLOCK_GPIO17_OUT
 #define ETH_ADDR 0
 #define ETH_TYPE ETH_PHY_LAN8720
 #define ETH_RESET_PIN 5
 #define ETH_MDC_PIN 23
 #define ETH_MDIO_PIN 18
-
-#define vers "NTP GPS V02A (Rev.RTC)"
 
 // PINS
 //  GPS
@@ -47,57 +40,73 @@ const u_int8_t RTC_SCL_PIN = 16;
 const u_int16_t GPS_BAUD = 9600;
 HardwareSerial GPSSerial(2);
 
-// Time Server Port
+// Time Server Port according to the standard
 #define NTP_PORT 123
 
+// Size of a version 4 NTP packet
 static const int NTP_PACKET_SIZE = 48;
-
 // buffers for receiving and sending data
 byte packetBuffer[NTP_PACKET_SIZE];
 
-// An Ethernet UDP instance
-WiFiUDP udp;
-
-// GPS instance
-TinyGPSPlus gps;
-
-volatile uint32_t timestamp, ppsTimestamp;
-uint32_t tempval;
-
-////////////////////////////////////////
-
-// LM: GPS message parsing
+// GPS message parsing
 const char EOL = 10;   // End-of-line
 const int MSGLEN = 66; // GNRMC message length, 66 printable characters + \r
 String tmpMsg = "";
 String gnrmcMsg = "";
 
 // LM: Date/time handling
-String sUTD = ""; // UT Date
-String sUTC = ""; // UT Time
-const int CENTURY = 2000;
+String sUTD = "";         // UT Date
+String sUTC = "";         // UT Time
+const int CENTURY = 2000; // current century
+// NOTE needs to be updated in 2100
 
-// LM: Real-time clock
+// An Ethernet UDP instance
+// the class is due to how the ETHClass2 library is implemented
+WiFiUDP udp;
+
+// GPS instance
+TinyGPSPlus gps;
+
+// RTC instance
 RTC_DS3231 rtc;        // Oscillator i2c address is 0x68 (can't be changed)
 DateTime rtcNow;       // From rtc.now()
 boolean rtcON = false; // Flag indicating RTC present and initialized
+
+// RTC update interval from GPS, in seconds
+long updateInterval = 3600000;
+
+// STATE VARIABLES
+
+// current timestamp from the source that we've last read
+// ppsTimestamp is the value of timestamp at the last PPS pulse
+// both are updated in the syncToPPS() function so they are volatile
+volatile uint32_t timestamp, ppsTimestamp;
+// set to millis() when the last PPS pulse was received
+volatile uint32_t startofSec = 0;
+// when we receive a pulse this is set to true so our main loop can react to the
+// pulse.
+volatile bool unprocessedPulse = false;
+
+uint32_t tempval;
+
 // Time of last RTC update by Arduino run-time clock
 unsigned long lastGPSsync = 0;
-long updateInterval = 3600000;
+
 // https://arduino.stackexchange.com/questions/49567/synching-local-clock-usign-ntp-to-milliseconds
 // Do it backwards (milliseconds to fractional second)
 int milliseconds;
-volatile int startofSec = 0;
-volatile bool unprocessedPulse =
-    true; // gets set to the timestamp of the pulse.
+
 uint32_t fractionalSecond;
 #define MAXUINT32 4294967295. // i.e. (float) 2^32 - 1
 
+// Ethernet
+
+// Flag indicating whether the ethernet is connected
 static bool eth_connected = false;
 
-char daysOfTheWeek[7][12] = {"Sunday",   "Monday", "Tuesday", "Wednesday",
-                             "Thursday", "Friday", "Saturday"};
+// Function prototypes
 
+void WiFiEvent(arduino_event_id_t event);
 void processNTP();
 static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t d, uint8_t h,
@@ -111,89 +120,16 @@ bool getgps();
 void displayTime();
 String formatMS(int ms);
 
+int calculateChecksum(const char *msg);
+void nemaMsgSend(const char *msg);
+int nemaMsgDisable(const char *nema);
+int nemaMsgEnable(const char *nema);
+
+void syncToPPS();
+// logging
+
 void console_logger(ulog_level_t severity, char *msg) {
   Serial.printf("[%s]: %s\n", ulog_level_name(severity), msg);
-}
-
-// Ran on ETHERNET events, pardon the naming.
-// the ETHClass2 library is based on the Wifi library...
-void WiFiEvent(arduino_event_id_t event) {
-  switch (event) {
-  case ARDUINO_EVENT_ETH_START:
-    ULOG_INFO("ETH Started");
-    // set eth hostname here
-    ETH.setHostname("esp32-ethernet");
-    break;
-  case ARDUINO_EVENT_ETH_CONNECTED:
-    ULOG_INFO("ETH Connected");
-    break;
-  case ARDUINO_EVENT_ETH_GOT_IP:
-    ULOG_INFO("ETH MAC: %s, IPv4: %s, %s, %uMbps", ETH.macAddress().c_str(),
-              ETH.localIP().toString().c_str(),
-              ETH.fullDuplex() ? "FULL_DUPLEX" : "HALF_DUPLEX",
-              ETH.linkSpeed());
-
-    eth_connected = true;
-    break;
-  case ARDUINO_EVENT_ETH_DISCONNECTED:
-    ULOG_INFO("ETH Disconnected");
-    eth_connected = false;
-    break;
-  case ARDUINO_EVENT_ETH_STOP:
-    ULOG_INFO("ETH Stopped");
-    eth_connected = false;
-    break;
-  default:
-    break;
-  }
-}
-
-int calculateChecksum(const char *msg) {
-  int checksum = 0;
-  for (int i = 0; msg[i] && i < 32; i++)
-    checksum ^= (unsigned char)msg[i];
-
-  return checksum;
-}
-
-void nemaMsgSend(const char *msg) {
-  char checksum[8];
-  snprintf(checksum, sizeof(checksum) - 1, "*%.2X", calculateChecksum(msg));
-  GPSSerial.print("$");
-  GPSSerial.print(msg);
-  GPSSerial.println(checksum);
-  ULOG_DEBUG("$%s%s", msg, checksum);
-}
-
-int nemaMsgDisable(const char *nema) {
-  if (strlen(nema) != 3)
-    return 0;
-
-  char tmp[32];
-  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0", nema);
-  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
-  nemaMsgSend(tmp);
-
-  return 1;
-}
-
-int nemaMsgEnable(const char *nema) {
-  if (strlen(nema) != 3)
-    return 0;
-
-  char tmp[32];
-  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nema);
-  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0,0,0", nema);
-  nemaMsgSend(tmp);
-
-  return 1;
-}
-
-void syncToPPS() {
-  startofSec = millis();
-  unprocessedPulse = true;
-  ppsTimestamp = timestamp + 1;
-  timestamp++;
 }
 
 void setup() {
@@ -302,6 +238,91 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
       displayTime();
     }
   }
+}
+
+// Ran on ETHERNET events, pardon the naming.
+// the ETHClass2 library is based on the Wifi library...
+void WiFiEvent(arduino_event_id_t event) {
+  switch (event) {
+  case ARDUINO_EVENT_ETH_START:
+    ULOG_INFO("ETH Started");
+    // set eth hostname here
+    ETH.setHostname("esp32-ethernet");
+    break;
+  case ARDUINO_EVENT_ETH_CONNECTED:
+    ULOG_INFO("ETH Connected");
+    break;
+  case ARDUINO_EVENT_ETH_GOT_IP:
+    ULOG_INFO("ETH MAC: %s, IPv4: %s, %s, %uMbps", ETH.macAddress().c_str(),
+              ETH.localIP().toString().c_str(),
+              ETH.fullDuplex() ? "FULL_DUPLEX" : "HALF_DUPLEX",
+              ETH.linkSpeed());
+
+    eth_connected = true;
+    break;
+  case ARDUINO_EVENT_ETH_DISCONNECTED:
+    ULOG_INFO("ETH Disconnected");
+    eth_connected = false;
+    break;
+  case ARDUINO_EVENT_ETH_STOP:
+    ULOG_INFO("ETH Stopped");
+    eth_connected = false;
+    break;
+  default:
+    break;
+  }
+}
+
+// NEMA message processing
+
+int calculateChecksum(const char *msg) {
+  int checksum = 0;
+  for (int i = 0; msg[i] && i < 32; i++)
+    checksum ^= (unsigned char)msg[i];
+
+  return checksum;
+}
+
+void nemaMsgSend(const char *msg) {
+  char checksum[8];
+  snprintf(checksum, sizeof(checksum) - 1, "*%.2X", calculateChecksum(msg));
+  GPSSerial.print("$");
+  GPSSerial.print(msg);
+  GPSSerial.println(checksum);
+  ULOG_DEBUG("$%s%s", msg, checksum);
+}
+
+int nemaMsgDisable(const char *nema) {
+  if (strlen(nema) != 3)
+    return 0;
+
+  char tmp[32];
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0", nema);
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
+  nemaMsgSend(tmp);
+
+  return 1;
+}
+
+int nemaMsgEnable(const char *nema) {
+  if (strlen(nema) != 3)
+    return 0;
+
+  char tmp[32];
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nema);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0,0,0", nema);
+  nemaMsgSend(tmp);
+
+  return 1;
+}
+
+// PPS processing
+
+void syncToPPS() {
+  startofSec = millis();
+  unprocessedPulse = true;
+  ppsTimestamp = timestamp + 1;
+  timestamp++;
 }
 
 ////////////////////////////////////////
