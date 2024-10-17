@@ -620,13 +620,13 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
 void displayTime() {
   std::string buffer;
   const DateTime now = DateTime(timestamp - seventyYears);
-  buffer.append(String(now.month()).c_str());
+  buffer.append(formatMS(now.month()).c_str());
   buffer += "/";
   buffer.append(formatMS(now.day()).c_str());
   buffer += "/";
   buffer.append(String(now.year()).c_str());
   buffer += "  ";
-  buffer.append(String(now.hour()).c_str());
+  buffer.append(formatMS(now.hour()).c_str());
   buffer += ":";
   buffer.append(formatMS(now.minute()).c_str());
   buffer += ":";
