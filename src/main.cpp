@@ -340,14 +340,11 @@ void processNTP() {
     int PortNum = udp.remotePort();
 
     packetBuffer[0] = 0b00100100; // LI, Version, Mode
-    // Have to spoof stratum 1 because Galleon test client interprets stratum 2
-    // ID as a date/time (not IP)
+
     packetBuffer[1] = 1;    // stratum (GPS)
                             //  packetBuffer[1] = 2 ;   // stratum (RTC)
     packetBuffer[2] = 6;    // polling minimum (64 seconds - default)
-    packetBuffer[3] = 0xFA; // precision (reference sketch - ~15 milliseconds)
     packetBuffer[3] = 0xF7; // precision (2^-9 ~2 milliseconds)
-    packetBuffer[3] = 0x09; // precision (2^9 Testing)
 
     packetBuffer[7] = 0; // root delay
     packetBuffer[8] = 0;
@@ -364,16 +361,16 @@ void processNTP() {
     // No additional parsing required here
 
     // Reference identifier (for Stratum 1 type)
-    packetBuffer[12] = 82; //"R";
-    packetBuffer[13] = 84; //"T";
-    packetBuffer[14] = 67; //"C";
-    packetBuffer[15] = 0;  //"0";
-                           /*
-                               packetBuffer[12] = 192; // IP address of synchronization source
-                               packetBuffer[13] = 168; // (Test client from Galleon Systems interprets
-                              as date/time)                        packetBuffer[14] = 1;   //
-                              packetBuffer[15] = 225; //
-                           */
+    packetBuffer[12] = 71; //"G";
+    packetBuffer[13] = 80; //"P";
+    packetBuffer[14] = 83; //"S";
+    packetBuffer[15] = 0;  //" ";
+
+    // packetBuffer[12] = 80; //"P";
+    // packetBuffer[13] = 80; //"P";
+    // packetBuffer[14] = 83; //"S";
+    // packetBuffer[15] = 0;  //" ";
+
     // Reference timestamp
     tempval = timestamp;
     packetBuffer[16] = (tempval >> 24) & 0XFF;
@@ -400,41 +397,29 @@ void processNTP() {
     // Receive timestamp
     tempval = timestamp; // Same as reference timestamp
     packetBuffer[32] = (tempval >> 24) & 0XFF;
-    tempval = timestamp;
     packetBuffer[33] = (tempval >> 16) & 0xFF;
-    tempval = timestamp;
     packetBuffer[34] = (tempval >> 8) & 0xFF;
-    tempval = timestamp;
     packetBuffer[35] = (tempval) & 0xFF;
 
     tempval = fractionalSecond;
     packetBuffer[36] = (tempval >> 24) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[37] = (tempval >> 16) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[38] = (tempval >> 8) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[39] = (tempval) & 0xFF;
 
     // Transmit timestamp
     tempval = timestamp;
     packetBuffer[40] = (tempval >> 24) & 0XFF;
-    tempval = timestamp;
     packetBuffer[41] = (tempval >> 16) & 0xFF;
-    tempval = timestamp;
     packetBuffer[42] = (tempval >> 8) & 0xFF;
-    tempval = timestamp;
     packetBuffer[43] = (tempval) & 0xFF;
 
     // LM: Fractional second - Test NTP clients accept the following, but
     // Windows does not
     tempval = fractionalSecond;
     packetBuffer[44] = (tempval >> 24) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[45] = (tempval >> 16) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[46] = (tempval >> 8) & 0xFF;
-    tempval = fractionalSecond;
     packetBuffer[47] = (tempval) & 0xFF;
     // ;
 
@@ -446,8 +431,11 @@ void processNTP() {
     udp.write(packetBuffer, NTP_PACKET_SIZE);
     udp.endPacket();
     udp.flush();
-    //   if (ULOG_ENABLED)
-    //     displayTime();
+    if (ULOG_ENABLED) {
+      ULOG_INFO("Received a request from %s:%i", Remote.toString().c_str(),
+                PortNum);
+      displayTime();
+    }
   }
 }
 
