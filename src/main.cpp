@@ -113,7 +113,7 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t mm, uint8_t s);
 boolean getGPSdata();
 DateTime crack(String sDate, String sTime);
-void updateRTC();
+bool updateRTC();
 boolean rtcUpdateDue();
 void readRTC();
 bool getgps();
@@ -196,7 +196,8 @@ void setup() {
     while (GPSSerial.available()) {
       GPSSerial.read();
     }
-    updateRTC();
+    bool validTime = !rtc.lostPower();
+    validTime |= updateRTC();
     displayTime();
   };
 
@@ -228,13 +229,15 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     processNTP();
   }
   if (rtcUpdateDue()) {
-    ULOG_DEBUG("Attempting to update RTC..");
-
-    updateRTC();
-
-    if (ULOG_ENABLED) {
+    if (rtc.lostPower()) {
+      ULOG_WARNING("RTC lost power, updating RTC...");
+    } else {
+      ULOG_INFO("RTC update due, updating RTC...");
+    }
+    if (!updateRTC()) {
+      ULOG_ERROR("RTC update failed.");
+    } else if (ULOG_ENABLED) {
       ULOG_INFO("Updated RTC time.");
-      readRTC();
       displayTime();
     }
   }
@@ -562,7 +565,7 @@ DateTime crack(String sDate, String sTime) {
                   sTime.substring(4).toInt());
 }
 // RTC support
-void updateRTC() { // From GPS
+bool updateRTC() { // From GPS
   bool dataValid = false;
   for (int i = 0; i < 2; i++) {
     if (getGPSdata()) {
@@ -572,7 +575,7 @@ void updateRTC() { // From GPS
   }
   if (!dataValid) {
     ULOG_INFO("GPS data retrieval failed.");
-    return;
+    return false;
   }
 
   DateTime ut = DateTime(timestamp);
@@ -580,6 +583,8 @@ void updateRTC() { // From GPS
   ULOG_DEBUG("RTC updated.");
   lastGPSsync =
       millis(); // For subsequent updates (and milliseconds computation)
+
+  return true;
 }
 
 boolean rtcUpdateDue() { // Convenience test
@@ -587,6 +592,8 @@ boolean rtcUpdateDue() { // Convenience test
     if (millis() < lastGPSsync)
       return true; // Arduino millis() rollover
     if (lastGPSsync + updateInterval < millis())
+      return true;
+    if (rtc.lostPower())
       return true;
   }
   return false;
