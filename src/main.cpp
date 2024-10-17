@@ -74,7 +74,7 @@ RTC_DS3231 rtc;        // Oscillator i2c address is 0x68 (can't be changed)
 DateTime rtcNow;       // From rtc.now()
 boolean rtcON = false; // Flag indicating RTC present and initialized
 
-// RTC update interval from GPS, in seconds
+// RTC update interval from GPS, in milliseconds
 long updateInterval = 3600000;
 
 // STATE VARIABLES
@@ -109,9 +109,9 @@ void processNTP();
 static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t d, uint8_t h,
                                                        uint8_t mm, uint8_t s);
-boolean getGPSdata();
+boolean getGPSdata(bool allowBlocking = true);
 DateTime getTimefromString(String sDate, String sTime);
-bool updateRTC();
+bool updateRTC(bool allowBlocking);
 boolean rtcUpdateDue();
 void readRTC();
 bool getgps();
@@ -201,7 +201,7 @@ void setup() {
       GPSSerial.read();
     }
     bool validTime = !rtc.lostPower();
-    bool gpsValid = updateRTC();
+    bool gpsValid = updateRTC(true);
 
     if (ULOG_ENABLED) {
       if (!validTime) {
@@ -228,10 +228,6 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
               // (i.e. on the second). This revision monitors NTP port
               // continuously and attempts to retrieve GPS data whenever an NTP
               // request is received.\
-  // empty the serial buffer
-  while (GPSSerial.available()) {
-    GPSSerial.read();
-  }
 
   if (eth_connected) {
     processNTP();
@@ -243,7 +239,7 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     } else {
       ULOG_INFO("RTC update due, updating RTC...");
     }
-    if (!updateRTC()) {
+    if (!updateRTC(false)) {
       ULOG_ERROR("RTC update failed.");
     } else if (ULOG_ENABLED) {
       ULOG_INFO("Updated RTC time.");
@@ -255,6 +251,11 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
       setRTCSettings();
       attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS,
                       FALLING);
+    }
+  } else {
+    // empty the serial buffer
+    while (GPSSerial.available()) {
+      GPSSerial.read();
     }
   }
 }
@@ -532,12 +533,11 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
 
 // LM: Poll GPS when NTP request received. Time out if GPS does not return valid
 // data.
-
-boolean getGPSdata() {
+boolean getGPSdata(boolean allowBlocking) {
   long startTime = millis();
   bool validDataReceived = false;
   const long TIMEOUT = 5000;
-  while (millis() < startTime + TIMEOUT) {
+  do {
     if (getgps()) {
       gnrmcMsg = tmpMsg;
       ULOG_INFO(gnrmcMsg.c_str());
@@ -555,7 +555,7 @@ boolean getGPSdata() {
         break;
       }
     }
-  }
+  } while (allowBlocking && millis() < startTime + TIMEOUT);
 
   ULOG_INFO(validDataReceived ? "GPS data retrieval complete."
                               : "GPS data retrieval EPIC FAIL");
@@ -573,10 +573,10 @@ DateTime getTimefromString(String sDate, String sTime) {
                   sTime.substring(4).toInt());
 }
 // RTC support
-bool updateRTC() { // From GPS
+bool updateRTC(bool allowBlocking) { // From GPS
   bool dataValid = false;
   for (int i = 0; i < 2; i++) {
-    if (getGPSdata()) {
+    if (getGPSdata(allowBlocking)) {
       dataValid = true;
       break;
     }
