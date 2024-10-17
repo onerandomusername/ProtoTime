@@ -35,6 +35,7 @@ const u_int8_t GPS_PPS_PIN = 33;
 //  RTC
 const u_int8_t RTC_SDA_PIN = 32;
 const u_int8_t RTC_SCL_PIN = 16;
+const u_int8_t RTC_SQW_PIN = 39;
 
 // GPS serial
 const u_int16_t GPS_BAUD = 9600;
@@ -43,6 +44,7 @@ HardwareSerial GPSSerial(2);
 // Time Server Port according to the standard
 #define NTP_PORT 123
 
+short rtcOffset = 0; // RTC offset in milliseconds
 // Size of a version 4 NTP packet
 static const int NTP_PACKET_SIZE = 48;
 // buffers for receiving and sending data
@@ -78,14 +80,10 @@ long updateInterval = 3600000;
 // STATE VARIABLES
 
 // current timestamp from the source that we've last read
-// ppsTimestamp is the value of timestamp at the last PPS pulse
-// both are updated in the syncToPPS() function so they are volatile
-volatile uint32_t timestamp, ppsTimestamp;
+volatile uint32_t timestamp;
 // set to millis() when the last PPS pulse was received
 volatile uint32_t startofSec = 0;
-// when we receive a pulse this is set to true so our main loop can react to the
-// pulse.
-volatile bool unprocessedPulse = false;
+volatile uint32_t startofRTCSec = 0;
 
 uint32_t tempval;
 
@@ -112,7 +110,7 @@ static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
                                                        uint8_t d, uint8_t h,
                                                        uint8_t mm, uint8_t s);
 boolean getGPSdata();
-DateTime crack(String sDate, String sTime);
+DateTime getTimefromString(String sDate, String sTime);
 bool updateRTC();
 boolean rtcUpdateDue();
 void readRTC();
@@ -126,6 +124,8 @@ int nemaMsgDisable(const char *nema);
 int nemaMsgEnable(const char *nema);
 
 void syncToPPS();
+void syncToRTCPPS();
+void setRTCSettings();
 // logging
 
 void console_logger(ulog_level_t severity, char *msg) {
@@ -184,30 +184,43 @@ void setup() {
     ULOG_INFO("Couldn't find RTC");
   }
 
-  if (rtcON && ULOG_ENABLED) {
-    ULOG_DEBUG("Real-time clock (before startup sync): ");
-    readRTC();
-    displayTime();
-  }
+  attachInterrupt(digitalPinToInterrupt(GPS_PPS_PIN), syncToPPS, RISING);
+
   // If RTC is present and functional, update it from GPS (if possible)
-  delay(3000);
+  bool gpsValid = false;
+  bool validTime = false;
   if (rtcON) {
+    if (ULOG_ENABLED) {
+      ULOG_DEBUG("Real-time clock (before startup sync): ");
+      readRTC();
+      displayTime();
+    }
+    delay(3000);
     // empty the serial buffer
     while (GPSSerial.available()) {
       GPSSerial.read();
     }
     bool validTime = !rtc.lostPower();
-    validTime |= updateRTC();
-    displayTime();
+    bool gpsValid = updateRTC();
+
+    if (ULOG_ENABLED) {
+      if (!validTime) {
+        ULOG_ERROR("RTC update failed.");
+      } else {
+        ULOG_INFO("Real-time clock (after startup sync): ");
+        readRTC();
+        displayTime();
+      }
+    }
+
+    // enable the SQW pin to output a 1Hz signal
+    setRTCSettings();
+    attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS, FALLING);
   };
 
-  if (rtcON && ULOG_ENABLED) {
-    ULOG_INFO("Real-time clock (after startup sync): ");
-    readRTC();
-    displayTime();
+  if (!gpsValid) {
+    gpsValid = getGPSdata();
   }
-
-  attachInterrupt(GPS_PPS_PIN, syncToPPS, RISING);
 }
 
 void loop() { // Original loop received data from GPS continuously (i.e. per
@@ -220,16 +233,12 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     GPSSerial.read();
   }
 
-  if (unprocessedPulse) {
-    readRTC();
-    unprocessedPulse = false;
-  }
-
   if (eth_connected) {
     processNTP();
   }
   if (rtcUpdateDue()) {
-    if (rtc.lostPower()) {
+    bool lostPower = rtc.lostPower();
+    if (lostPower) {
       ULOG_WARNING("RTC lost power, updating RTC...");
     } else {
       ULOG_INFO("RTC update due, updating RTC...");
@@ -239,6 +248,13 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     } else if (ULOG_ENABLED) {
       ULOG_INFO("Updated RTC time.");
       displayTime();
+    }
+
+    if (lostPower) {
+      detachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN));
+      setRTCSettings();
+      attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS,
+                      FALLING);
     }
   }
 }
@@ -319,14 +335,18 @@ int nemaMsgEnable(const char *nema) {
   return 1;
 }
 
+void setRTCSettings() {
+  // must be ran after the RTC clock loses power
+  // set the RTC to output a 1Hz signal on the SQW pin
+  rtc.writeSqwPinMode(DS3231_SquareWave1Hz);
+  rtc.disable32K();
+}
+
 // PPS processing
 
-void syncToPPS() {
-  startofSec = millis();
-  unprocessedPulse = true;
-  ppsTimestamp = timestamp + 1;
-  timestamp++;
-}
+void syncToPPS() { startofSec = millis(); }
+
+void syncToRTCPPS() { startofRTCSec = millis(); }
 
 ////////////////////////////////////////
 
@@ -528,7 +548,7 @@ boolean getGPSdata() {
       if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
         sUTC = gnrmcMsg.substring(7, 13);
         sUTD = gnrmcMsg.substring(53, 59);
-        timestamp = crack(sUTD, sUTC).unixtime();
+        timestamp = getTimefromString(sUTD, sUTC).unixtime();
         tmpMsg = "";
         validDataReceived = true;
         ULOG_INFO("Screaming Success!");
@@ -544,7 +564,7 @@ boolean getGPSdata() {
 
 // My message utilities
 
-DateTime crack(String sDate, String sTime) {
+DateTime getTimefromString(String sDate, String sTime) {
   // sDate = ddmmyy
   // sTime = hhmmss
   return DateTime(sDate.substring(4).toInt() + CENTURY,
@@ -566,7 +586,13 @@ bool updateRTC() { // From GPS
     return false;
   }
 
-  DateTime ut = DateTime(timestamp);
+  // sync the RTC clock to the start of the second.
+  DateTime ut = DateTime(timestamp + 1);
+  while (millis() - startofSec > 3) {
+    // ULOG_INFO("millis: %u, startofSec: %u", millis(), startofSec);
+    delay(1);
+  }
+  rtcOffset = millis() - startofSec;
   rtc.adjust(ut);
   ULOG_DEBUG("RTC updated.");
   lastGPSsync =
@@ -592,18 +618,20 @@ void readRTC() { // Read time from RTC in same format as GPS crack()
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
   // ouch! RTC is synched to GPS at least hourly. Arduino's millisecond counter
   // is good for that range.
-  long delta = millis() - startofSec;
+  long delta = millis() - startofRTCSec + rtcOffset;
   // To do: Handle rollover rigorously - Next is placeholder
   //        Or power-cycle the Arduino occasionally (before 50 days)
   timestamp = rtcNow.unixtime() + seventyYears; // 1900 Epoch
-  if (ppsTimestamp - timestamp == 1) {
-    // don't change the timestamp if the PPS timestamp is in the future by just
-    // one second
-    timestamp = ppsTimestamp;
-  }
-  if (delta < 0) { // Rollover has occurred
-                   // Constant below is 2^32 - 1
-    delta = millis() + (4294967295 - startofSec);
+  if (delta < 0) {                              // Rollover has occurred, maybe
+
+    if (delta + rtcOffset >= rtcOffset / 2) {
+      // its likely not a rollover but the offset is poor
+      timestamp--;
+      delta = 1000 + delta;
+    } else {
+      // Constant below is 2^32 - 1
+      delta = millis() + (4294967295 - startofRTCSec) + rtcOffset;
+    }
   }
   milliseconds = delta % 1000;
   // Compute fractional seconds
