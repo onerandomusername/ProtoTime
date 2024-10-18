@@ -31,7 +31,6 @@ There is not a wiring guide as of yet, but the pins are defined in the source fi
 
 While not many choices are afforded, there is one option regarding the RTC. You *can* opt to run it without a battery, but behaviour when there are no known-good time sources is currently unknown. This should be fixed in a future version.
 
-
 ## Credits
 
 The first few commits and working models of this project were based  <https://lloydm.net/Demos/GPS-NTP.html>, which itself was based on <https://forum.arduino.cc/index.php?topic=197870.0>.
