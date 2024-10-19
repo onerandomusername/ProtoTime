@@ -13,7 +13,7 @@
 #include <RTClib.h>
 #include <TinyGPS++.h>
 
-#define vers "NTP GPS V02A (Rev.RTC)"
+#define vers "NTP GPS V03"
 
 // required for ETHClass2
 #define ETH ETH2
@@ -41,10 +41,14 @@ const u_int8_t RTC_SQW_PIN = 39;
 const u_int16_t GPS_BAUD = 9600;
 HardwareSerial GPSSerial(2);
 
-// Time Server Port according to the standard
+// time server port assigned to NTP by IANA, referred to in RFC 5905
 #define NTP_PORT 123
 
-short rtcOffset = 4; // RTC offset in milliseconds
+// Keep track of how off is the increment on the RTC module compared to the GPS
+// pulse. This is used to keep consistency when the GPS module is lost It is set
+// automatically when the GPS and RTC modules are synced. Stored in milliseconds
+short rtcOffset = 4; // this SHOULD be updated with a difference of when the two
+                     // pulses take place, but currently does not work that way.
 // Size of a version 4 NTP packet
 static const int NTP_PACKET_SIZE = 48;
 // buffers for receiving and sending data
@@ -56,17 +60,18 @@ const int MSGLEN = 66; // GNRMC message length, 66 printable characters + \r
 String tmpMsg = "";
 String gnrmcMsg = "";
 
-// LM: Date/time handling
+// Date/time handling
 String sUTD = "";         // UT Date
 String sUTC = "";         // UT Time
 const int CENTURY = 2000; // current century
 // NOTE needs to be updated in 2100
 
-// An Ethernet UDP instance
-// the class is due to how the ETHClass2 library is implemented
+// Ethernet UDP instance
+// the class naming is due to how the ETHClass2 library is implemented
 WiFiUDP udp;
 
 // GPS instance
+// uses the GPSSerial as defined above
 TinyGPSPlus gps;
 
 // RTC instance
@@ -120,9 +125,6 @@ enum class Source { GPS, RTC };
 
 void WiFiEvent(arduino_event_id_t event);
 void processNTP();
-static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
-                                                       uint8_t d, uint8_t h,
-                                                       uint8_t mm, uint8_t s);
 boolean getGPSdata(bool allowBlocking = true);
 DateTime getTimefromString(String sDate, String sTime);
 bool updateRTC(bool allowBlocking);
@@ -133,9 +135,9 @@ void displayTime();
 String formatMS(int ms);
 
 int calculateChecksum(const char *msg);
-void nemaMsgSend(const char *msg);
-int nemaMsgDisable(const char *nema);
-int nemaMsgEnable(const char *nema);
+void nmeaMsgSend(const char *msg);
+int nmeaMsgDisable(const char *nmea);
+int nmeaMsgEnable(const char *nmea);
 
 void syncToPPS();
 void syncToRTCPPS();
@@ -312,8 +314,11 @@ void WiFiEvent(arduino_event_id_t event) {
   }
 }
 
-// NEMA message processing
+// nmea message processing
 
+/// @brief calculate the checksum of a NMEA message
+/// @param msg the message to calculate, missing its checksum.
+/// @return the checksum of the message
 int calculateChecksum(const char *msg) {
   int checksum = 0;
   for (int i = 0; msg[i] && i < 32; i++)
@@ -322,7 +327,9 @@ int calculateChecksum(const char *msg) {
   return checksum;
 }
 
-void nemaMsgSend(const char *msg) {
+/// @brief Send an NMEA message to the GPS module
+/// @param msg The message to send, minus checksum and start character.
+void nmeaMsgSend(const char *msg) {
   char checksum[8];
   snprintf(checksum, sizeof(checksum) - 1, "*%.2X", calculateChecksum(msg));
   GPSSerial.print("$");
@@ -331,45 +338,55 @@ void nemaMsgSend(const char *msg) {
   ULOG_DEBUG("$%s%s", msg, checksum);
 }
 
-int nemaMsgDisable(const char *nema) {
-  if (strlen(nema) != 3)
+/// @brief Disable an NMEA message from the GPS module
+/// @param nmea the NMEA message to disable
+/// @return whether or not the message was successfully disabled
+int nmeaMsgDisable(const char *nmea) {
+  if (strlen(nmea) != 3)
     return 0;
 
   char tmp[32];
-  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0", nema);
-  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nema);
-  nemaMsgSend(tmp);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0", nmea);
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,0,0,0,0,0", nmea);
+  nmeaMsgSend(tmp);
 
   return 1;
 }
 
-int nemaMsgEnable(const char *nema) {
-  if (strlen(nema) != 3)
+/// @brief Enable an NMEA message from the GPS module
+/// @param nmea the NMEA message to enable
+/// @return whether or not the message was successfully enabled
+int nmeaMsgEnable(const char *nmea) {
+  if (strlen(nmea) != 3)
     return 0;
 
   char tmp[32];
-  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nema);
-  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0,0,0", nema);
-  nemaMsgSend(tmp);
+  // snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0", nmea);
+  snprintf(tmp, sizeof(tmp) - 1, "PUBX,40,%s,0,1,0,0,0,0", nmea);
+  nmeaMsgSend(tmp);
 
   return 1;
 }
 
+/// @brief Set the GPS module to only output $GPRMC messages
+/// This is done to reduce the amount of data that needs to be processed
 void setGPSSettings() {
   if (!gpsNeedsSettings) {
     return;
   }
   // Disable everything but $GPRMC
-  nemaMsgDisable("GLL");
-  nemaMsgDisable("VTG");
-  nemaMsgDisable("GSV");
-  nemaMsgDisable("GGA");
-  nemaMsgDisable("GSA");
+  nmeaMsgDisable("GLL");
+  nmeaMsgDisable("VTG");
+  nmeaMsgDisable("GSV");
+  nmeaMsgDisable("GGA");
+  nmeaMsgDisable("GSA");
   // enable only $GPRMC
-  nemaMsgEnable("RMC");
+  nmeaMsgEnable("RMC");
   gpsNeedsSettings = false;
 }
 
+/// @brief Set the RTC module to output a 1Hz signal at the start of every
+/// second
 void setRTCSettings() {
   // must be ran after the RTC clock loses power
   // set the RTC to output a 1Hz signal on the SQW pin
@@ -379,15 +396,25 @@ void setRTCSettings() {
 
 // PPS processing
 
+/// @brief Sync to the PPS pulse
+/// Runs on every pulse from the GPS module when it has a lock
+/// Will not be triggered if the GPS module doesn't have a signal
+/// Hence, we can also use PPS pulses to know if the GPS is active
 void syncToPPS() {
   startofSec = millis();
   gpsActive = true;
 }
 
+/// @brief Sync to the RTC PPS pulse
+/// Runs on every pulse from the RTC module
+/// We assume the RTC module is always active
 void syncToRTCPPS() { startofRTCSec = millis(); }
 
 ////////////////////////////////////////
 
+/// @brief Process NTP requests
+/// This function is called whenever an NTP request is received
+/// There is not much checking of whether or not a packet is valid
 void processNTP() {
 
   // if there's data available, read a packet
@@ -472,8 +499,6 @@ void processNTP() {
     packetBuffer[42] = (tempval >> 8) & 0xFF;
     packetBuffer[43] = (tempval) & 0xFF;
 
-    // LM: Fractional second - Test NTP clients accept the following, but
-    // Windows does not
     tempval = fractionalSecond;
     packetBuffer[44] = (tempval >> 24) & 0xFF;
     packetBuffer[45] = (tempval >> 16) & 0xFF;
@@ -499,13 +524,8 @@ void processNTP() {
 
 ////////////////////////////////////////
 
-// static bool getgps()
-
-// LM: The library crack method always returned an invalid age. I don't know
-// why.
-//     Nor did gps.encode(c). So I modified this function to construct a string
-//     from the $GNRMC message, and return true on detecting EOL.
-
+/// @brief get data from the gps module. Helper method for getGPSdata
+/// @return whether or not valid data was received
 bool getgps() {
   char c;
   while (GPSSerial.available()) {
@@ -514,7 +534,7 @@ bool getgps() {
     if (gps.encode(c)) {
       return true;
     }
-    // LM -
+
     if (c == EOL)
       return true;
     if (c == '$') {
@@ -526,43 +546,11 @@ bool getgps() {
   return false;
 }
 
-// NTP since 1900/01/01
-static unsigned long int numberOfSecondsSince1900Epoch(uint16_t y, uint8_t m,
-                                                       uint8_t d, uint8_t h,
-                                                       uint8_t mm, uint8_t s) {
-
-  uint16_t days = d;
-
-  for (uint8_t i = 1; i < m; ++i)
-    days += pgm_read_byte(daysInMonth + i - 1);
-  int x = 1970;
-  for (; x < y; ++x) {
-    if ((x % 400) == 0) {
-      ++days;
-    } else if ((x % 100) == 0) {
-      days = days;
-    } else if ((x % 4) == 0) {
-      ++days;
-    }
-  }
-
-  if (m > 2) {
-    if ((x % 400) == 0) {
-      ++days;
-    } else if ((x % 100) == 0) {
-      days = days;
-    } else if ((x % 4) == 0) {
-      ++days;
-    }
-  }
-
-  days += 365 * y + (y + 3) / 4 - 1;
-  return days * 24L * 3600L + h * 3600L + mm * 60L + s + seventyYears;
-}
-////////////////////////////////////////
-
-// LM: Poll GPS when NTP request received. Time out if GPS does not return valid
-// data.
+/// @brief Get GPS data
+/// @param allowBlocking Whether or not to allow this command to block.
+///                      If blocking is not allowed, it runs once and returns,
+///                      whether or not it has received valid data.
+/// @return Whether or not valid data was received
 boolean getGPSdata(boolean allowBlocking) {
   long startTime = millis();
   bool validDataReceived = false;
@@ -595,6 +583,10 @@ boolean getGPSdata(boolean allowBlocking) {
 
 // My message utilities
 
+/// @brief Crack the date and time from the $GNRMC message
+/// @param sDate the date in ddmmyy format
+/// @param sTime the time in hhmmss format
+/// @return a valid DateTime object of the provided time
 DateTime getTimefromString(String sDate, String sTime) {
   // sDate = ddmmyy
   // sTime = hhmmss
@@ -632,6 +624,8 @@ bool updateRTC(bool allowBlocking) { // From GPS
   return true;
 }
 
+/// @brief Check if an RTC update is due based on when the last update was.
+/// @return whether the RTC update is due
 boolean rtcUpdateDue() { // Convenience test
   if (rtcON) {
     if (lastGPSsync == 0)
@@ -646,6 +640,9 @@ boolean rtcUpdateDue() { // Convenience test
   return false;
 }
 
+/// @brief Read time from RTC or GPS
+/// The time is read into the global timestamp object.
+/// @return Which source the time was read from.
 Source readTime() { // Read time from RTC or GPS
   rtcNow = rtc.now();
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
@@ -683,8 +680,8 @@ Source readTime() { // Read time from RTC or GPS
   return source;
 }
 
-// My debug
-
+/// @brief  Display the current time
+/// This function is used for debugging purposes
 void displayTime() {
   std::string buffer;
   const DateTime now = DateTime(timestamp - seventyYears);
@@ -711,6 +708,9 @@ void displayTime() {
   ULOG_INFO(buffer.c_str());
 }
 
+/// @brief Format milliseconds
+/// @param ms The milliseconds to format
+/// @return A string representation of the milliseconds, zero padded
 String formatMS(int ms) {
   // pad minute or second with leading 0
   String result = "";
