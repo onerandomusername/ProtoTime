@@ -2,8 +2,8 @@
 
 - [ProtoTime](#prototime)
   - [About](#about)
-  - [Rationale](#rationale)
   - [Building your own](#building-your-own)
+    - [Required parts](#required-parts)
   - [Credits](#credits)
   - [See Also](#see-also)
 
@@ -14,11 +14,12 @@
 
 A networked power-over-ethernet GPS stratum 1 clock[^1]. Uses both a RTC module and a GPS module to have a fallback in the event that the GPS signal is lost.
 
-## Rationale
-
-A networked power-over-ethernet GPS stratum 1 clock[^1]. Primarily used in theatrical performance spaces on isolated networks that do not have existing infrastructure. Very useful for computers to get accurate time in a location that does have internet.
+Ever since my first days of theatre, one of the people I work with, had, on multiple occassions, remarked how a real time clock server would suit our network nicely, but we could not afford an expensive professionally built module at that point in time. I had the idea from then on, that some day, I wanted to build my own time server, as it didn't seem like it could be too hard. (Spoiler alert, it really wasn't.)
 
 ## Building your own
+
+### Required parts
+
 
 - [T-Ethernet-POE](https://www.lilygo.cc/products/t-internet-poe) from LILYGO.
   - Make sure to get the one with a programmer as well, even if you have one. Their pinout is different from a typical programmer and has weird pin spacing, so its recommended to get a programmer. Do note that this module is *not* electrically isolated, so you should have it connected to both POE power and usb power simultaneously.
