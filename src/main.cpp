@@ -93,6 +93,7 @@ volatile uint32_t startofSec = 0;
 volatile uint32_t startofRTCSec = 0;
 // if the source is present and active
 volatile bool gpsActive = false;
+bool rtcActive = false; // set to the inverse of rtc.lostPower()
 bool gpsNeedsSettings = true;
 
 uint32_t tempval;
@@ -152,6 +153,7 @@ void console_logger(ulog_level_t severity, char *msg) {
 void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  pinMode(GPS_PPS_PIN, INPUT_PULLDOWN);
 
   ULOG_INIT();
 
@@ -212,8 +214,8 @@ void setup() {
     while (GPSSerial.available()) {
       GPSSerial.read();
     }
-    bool validTime = !rtc.lostPower();
-    bool gpsValid = updateRTC(true);
+    validTime = updateRTC(true);
+    gpsValid = validTime;
 
     if (ULOG_ENABLED) {
       if (!validTime) {
@@ -231,7 +233,19 @@ void setup() {
   };
 
   if (!gpsValid) {
-    gpsValid = getGPSdata();
+    gpsValid = getGPSdata(true);
+  }
+
+  uint32_t lastStart = startofSec;
+  if (startofSec == 0 && gpsValid) {
+    ULOG_INFO("No PPS pulse received, waiting for a pulse.");
+    delay(1000); // wait for the first PPS pulse
+  }
+  if (lastStart == startofSec) {
+    ULOG_WARNING("No PPS pulse detected.");
+    gpsActive = false;
+  } else {
+    ULOG_INFO("PPS pulse detected.");
   }
 }
 
@@ -246,16 +260,20 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
   }
   if (rtcUpdateDue()) {
     bool lostPower = rtc.lostPower();
-    if (lostPower) {
-      ULOG_WARNING("RTC lost power, updating RTC...");
-    } else {
-      ULOG_INFO("RTC update due, updating RTC...");
+    if (!(!rtcActive && lostPower) && gpsActive) {
+      if (lostPower) {
+        ULOG_WARNING("RTC lost power, updating RTC...");
+      } else {
+        ULOG_INFO("RTC update due, updating RTC...");
+      }
     }
-    if (!updateRTC(false)) {
-      ULOG_ERROR("RTC update failed.");
-    } else if (ULOG_ENABLED) {
-      ULOG_INFO("Updated RTC time.");
-      displayTime();
+    if (gpsActive) {
+      if (!updateRTC(false)) {
+        ULOG_ERROR("RTC update failed.");
+      } else if (ULOG_ENABLED) {
+        ULOG_INFO("Updated RTC time.");
+        displayTime();
+      }
     }
 
     if (lostPower) {
@@ -275,6 +293,7 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
       gpsNeedsSettings = true;
     }
     if (gpsActive && millis() - startofSec < 1000 && gpsNeedsSettings) {
+      ULOG_INFO("GPS Signal Restored");
       setGPSSettings();
       gpsNeedsSettings = false;
     }
@@ -441,21 +460,25 @@ void processNTP() {
     packetBuffer[10] = 0;
     packetBuffer[11] = 0;
 
-    readTime(); // Assume succeeds
+    Source source = readTime(); // Assume succeeds
     // readTime() has cracked date/time and timestamp
     // No additional parsing required here
 
-    if (gpsActive) {
+    if (source == Source::GPS) {
       packetBuffer[12] = 71;  //"G";
       packetBuffer[13] = 80;  //"P";
       packetBuffer[14] = 83;  //"S";
       packetBuffer[15] = 115; //"s";
-    } else {
+    } else if (source == Source::RTC) {
       packetBuffer[12] = 80; //"P";
       packetBuffer[13] = 80; //"P";
       packetBuffer[14] = 83; //"S";
       packetBuffer[15] = 0;  //" ";
+    } else {
+      ULOG_WARNING("No time source available.");
+      return; // No time source available
     }
+
     // Reference timestamp
     tempval = referenceTimestamp + seventyYears;
     packetBuffer[16] = (tempval >> 24) & 0XFF;
@@ -530,7 +553,6 @@ bool getgps() {
   char c;
   while (GPSSerial.available()) {
     c = GPSSerial.read();
-    Serial.print(c);
     if (gps.encode(c)) {
       return true;
     }
@@ -555,13 +577,16 @@ boolean getGPSdata(boolean allowBlocking) {
   long startTime = millis();
   bool validDataReceived = false;
   const long TIMEOUT = 5000;
+  if (!allowBlocking && !GPSSerial.available())
+    return false; // shortcut to block all logging and zero checking. can't
+                  // do anything with no data.
   do {
     if (getgps()) {
       gnrmcMsg = tmpMsg;
       ULOG_INFO(gnrmcMsg.c_str());
-      // $GNRMC message length is 67, including EOL - Ensure full length
+      // $GNRMC message length is 66, not including EOL - Ensure full length
       // message
-      ULOG_INFO("gnrmcMsg length: %i", gnrmcMsg.length());
+      ULOG_DEBUG("gnrmcMsg length: %i", gnrmcMsg.length());
       // support the length being slightly different
       if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
         sUTC = gnrmcMsg.substring(7, 13);
@@ -570,14 +595,13 @@ boolean getGPSdata(boolean allowBlocking) {
         referenceTimestamp = timestamp;
         tmpMsg = "";
         validDataReceived = true;
-        ULOG_INFO("Screaming Success!");
         break;
       }
     }
   } while (allowBlocking && millis() < startTime + TIMEOUT);
 
   ULOG_INFO(validDataReceived ? "GPS data retrieval complete."
-                              : "GPS data retrieval EPIC FAIL");
+                              : "GPS data retrieval failed.");
   return validDataReceived;
 }
 
@@ -597,29 +621,40 @@ DateTime getTimefromString(String sDate, String sTime) {
 }
 // RTC support
 bool updateRTC(bool allowBlocking) { // From GPS
-  bool dataValid = false;
+  bool validData = false;
   for (int i = 0; i < 2; i++) {
-    if (getGPSdata(allowBlocking)) {
-      dataValid = true;
+    validData = getGPSdata(allowBlocking);
+    if (validData) {
       break;
     }
   }
-  if (!dataValid) {
-    ULOG_INFO("GPS data retrieval failed.");
+  if (!validData) {
+    if (allowBlocking)
+      ULOG_WARNING("GPS data retrieval failed.");
     return false;
   }
 
   // sync the RTC clock to the start of the second.
-  DateTime ut = DateTime(timestamp + 1);
-  while (millis() - startofSec > 3) {
+  uint32_t pulseWait = millis();
+  uint32_t now = millis();
+  while (true) {
+    if (!(now - startofSec > 3))
+      break;
+    if (now - pulseWait > 1000) {
+      ULOG_WARNING("No PPS pulse detected.");
+      return false;
+    }
     // ULOG_INFO("millis: %u, startofSec: %u", millis(), startofSec);
     delay(1);
+    now = millis();
   }
   rtcOffset = millis() - startofSec;
+  DateTime ut = DateTime(timestamp + 1 + rtcOffset / 1000);
   rtc.adjust(ut);
+  timestamp = ut.unixtime() + seventyYears;
+  rtcOffset = rtcOffset % 1000;
   ULOG_DEBUG("RTC updated.");
-  lastGPSsync =
-      millis(); // For subsequent updates (and milliseconds computation)
+  lastGPSsync = now; // For subsequent updates (and milliseconds computation)
 
   return true;
 }
