@@ -78,6 +78,7 @@ TinyGPSPlus gps;
 RTC_DS3231 rtc;        // Oscillator i2c address is 0x68 (can't be changed)
 DateTime rtcNow;       // From rtc.now()
 boolean rtcON = false; // Flag indicating RTC present and initialized
+boolean rtcPulseAlive = false;
 
 // RTC update interval from GPS, in milliseconds
 long updateInterval = 3600000;
@@ -294,8 +295,14 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
   }
 
   if (rtcActive && millis() - startofRTCSec > 2000) {
+    rtcPulseAlive = false;
     rtcActive = false;
     ULOG_WARNING("RTC signal lost.");
+  }
+  if (!rtcPulseAlive && millis() - startofRTCSec < 1000) {
+    ULOG_INFO("RTC Signal Restored");
+    rtcPulseAlive = true;
+    rtcActive = true;
   }
 }
 
