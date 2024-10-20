@@ -55,18 +55,6 @@ static const int NTP_PACKET_SIZE = 48;
 // buffers for receiving and sending data
 byte packetBuffer[NTP_PACKET_SIZE];
 
-// GPS message parsing
-const char EOL = 10;   // End-of-line
-const int MSGLEN = 66; // GNRMC message length, 66 printable characters + \r
-String tmpMsg = "";
-String gnrmcMsg = "";
-
-// Date/time handling
-String sUTD = "";         // UT Date
-String sUTC = "";         // UT Time
-const int CENTURY = 2000; // current century
-// NOTE needs to be updated in 2100
-
 // Ethernet UDP instance
 // the class naming is due to how the ETHClass2 library is implemented
 WiFiUDP ethUdp;
@@ -131,9 +119,7 @@ enum class Source { GPS, RTC, NONE };
 
 void WiFiEvent(arduino_event_id_t event);
 void processNTP(WiFiUDP &udp);
-boolean getGPSdata(bool allowBlocking = true);
-DateTime getTimefromString(String sDate, String sTime);
-bool updateRTC(bool allowBlocking);
+bool updateRTC();
 boolean rtcUpdateDue();
 Source readTime();
 Source readTime(Source source);
@@ -159,6 +145,11 @@ void console_logger(ulog_level_t severity, char *msg) {
 void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  GPSSerial.onReceive([]() {
+    while (GPSSerial.available()) {
+      gps.encode(GPSSerial.read());
+    }
+  });
   pinMode(GPS_PPS_PIN, INPUT_PULLDOWN);
   pinMode(RTC_SQW_PIN, INPUT_PULLDOWN);
 
@@ -234,11 +225,7 @@ void setup() {
     readTime(Source::RTC);
     displayTime();
 #endif
-    // empty the serial buffer
-    while (GPSSerial.available()) {
-      GPSSerial.read();
-    }
-    if (!updateRTC(true)) {
+    if (!updateRTC()) {
       ULOG_ERROR("RTC update failed.");
 #ifdef ULOG_ENABLED
     } else {
@@ -270,7 +257,7 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     }
     rtcActive &= !lostPower;
     if (gpsActive) {
-      if (!updateRTC(false)) {
+      if (!updateRTC()) {
         ULOG_ERROR("RTC update failed.");
 #ifdef ULOG_ENABLED
       } else {
@@ -297,11 +284,6 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     processNTP(wifiUdp);
   }
 #endif
-
-  // empty the serial buffer
-  while (GPSSerial.available()) {
-    GPSSerial.read();
-  }
 
   if (gpsActive && millis() - startofSec > 2000) {
     gpsActive = false;
@@ -507,9 +489,7 @@ void processNTP(WiFiUDP &udp) {
     packetBuffer[10] = 0;
     packetBuffer[11] = 0;
 
-    Source source = readTime(); // Assume succeeds
-    // readTime() has cracked date/time and timestamp
-    // No additional parsing required here
+    Source source = readTime();
 
     if (source == Source::GPS) {
       ULOG_INFO("GPS source");
@@ -604,95 +584,17 @@ void processNTP(WiFiUDP &udp) {
   }
 }
 
-////////////////////////////////////////
-
-/// @brief get data from the gps module. Helper method for getGPSdata
-/// @return whether or not valid data was received
-bool getgps() {
-  char c;
-  while (GPSSerial.available()) {
-    c = GPSSerial.read();
-    if (gps.encode(c)) {
-      return true;
-    }
-
-    if (c == EOL)
-      return true;
-    if (c == '$') {
-      tmpMsg = c;
-    } else if (tmpMsg.length() > 0 && tmpMsg.length() < 80) {
-      tmpMsg += c;
-    }
-  }
-  return false;
-}
-
-/// @brief Get GPS data
-/// @param allowBlocking Whether or not to allow this command to block.
-///                      If blocking is not allowed, it runs once and returns,
-///                      whether or not it has received valid data.
-/// @return Whether or not valid data was received
-boolean getGPSdata(boolean allowBlocking) {
-  long startTime = millis();
-  bool validDataReceived = false;
-  const long TIMEOUT =
-      3000; // this is ran 3 times so this time is effectively tripled
-  if (!allowBlocking && !GPSSerial.available())
-    return false; // shortcut to block all logging and zero checking. can't
-                  // do anything with no data.
-  do {
-    if (getgps()) {
-      gnrmcMsg = tmpMsg;
-      ULOG_INFO(gnrmcMsg.c_str());
-      // $GNRMC message length is 66, not including EOL - Ensure full length
-      // message
-      ULOG_DEBUG("gnrmcMsg length: %i", gnrmcMsg.length());
-      // support the length being slightly different
-      if (gnrmcMsg.charAt(17) == 'A' && gnrmcMsg.length() == MSGLEN) {
-        sUTC = gnrmcMsg.substring(7, 13);
-        sUTD = gnrmcMsg.substring(53, 59);
-        timestamp = getTimefromString(sUTD, sUTC).unixtime();
-        referenceTimestamp = timestamp;
-        tmpMsg = "";
-        validDataReceived = true;
-        break;
-      }
-    }
-  } while (allowBlocking && millis() < startTime + TIMEOUT);
-
-  ULOG_INFO(validDataReceived ? "GPS data retrieval complete."
-                              : "GPS data retrieval failed.");
-  return validDataReceived;
-}
-
-// My message utilities
-
-/// @brief Crack the date and time from the $GNRMC message
-/// @param sDate the date in ddmmyy format
-/// @param sTime the time in hhmmss format
-/// @return a valid DateTime object of the provided time
-DateTime getTimefromString(String sDate, String sTime) {
-  // sDate = ddmmyy
-  // sTime = hhmmss
-  return DateTime(sDate.substring(4).toInt() + CENTURY,
-                  sDate.substring(2, 4).toInt(), sDate.substring(0, 2).toInt(),
-                  sTime.substring(0, 2).toInt(), sTime.substring(2, 4).toInt(),
-                  sTime.substring(4).toInt());
-}
 // RTC support
-bool updateRTC(bool allowBlocking) { // From GPS
-  bool validData = false;
-  for (int i = 0; i < 2; i++) {
-    validData = getGPSdata(allowBlocking);
-    if (validData) {
-      break;
-    }
-  }
-  if (!validData) {
-    if (allowBlocking)
-      ULOG_WARNING("GPS data retrieval failed.");
+bool updateRTC() { // From GPS
+  if (!gpsActive)
     return false;
-  }
+  TinyGPSDate date = gps.date;
+  TinyGPSTime time = gps.time;
+  if (!date.isValid() || !time.isValid() || date.age() > 1000 ||
+      time.age() > 1000)
+    return false;
+  DateTime ut = DateTime(date.year(), date.month(), date.day(), time.hour(),
+                         time.minute(), time.second());
 
   // sync the RTC clock to the start of the second.
   uint32_t pulseWait = millis();
@@ -709,7 +611,7 @@ bool updateRTC(bool allowBlocking) { // From GPS
     now = millis();
   }
   rtcOffset = millis() - startofSec;
-  DateTime ut = DateTime(timestamp + 1 + rtcOffset / 1000);
+  ut = ut + TimeSpan(1 + rtcOffset / 1000);
   rtc.adjust(ut);
   timestamp = ut.unixtime() + seventyYears;
   rtcOffset = rtcOffset % 1000;
