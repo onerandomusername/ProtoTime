@@ -217,21 +217,23 @@ void setup() {
   rtcActive = !rtc.lostPower();
 
   if (rtcON) {
-    if (ULOG_ENABLED) {
-      ULOG_DEBUG("Real-time clock (before startup sync): ");
-      readTime(Source::RTC);
-      displayTime();
-    }
+#ifdef ULOG_ENABLED
+    ULOG_DEBUG("Real-time clock (before startup sync): ");
+    readTime(Source::RTC);
+    displayTime();
+#endif
     // empty the serial buffer
     while (GPSSerial.available()) {
       GPSSerial.read();
     }
     if (!updateRTC(true)) {
       ULOG_ERROR("RTC update failed.");
-    } else if (ULOG_ENABLED) {
+#ifdef ULOG_ENABLED
+    } else {
       ULOG_INFO("Real-time clock (after startup sync): ");
       readTime(Source::RTC);
       displayTime();
+#endif
     }
 
     // enable the SQW pin to output a 1Hz signal
@@ -258,9 +260,11 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     if (gpsActive) {
       if (!updateRTC(false)) {
         ULOG_ERROR("RTC update failed.");
-      } else if (ULOG_ENABLED) {
+#ifdef ULOG_ENABLED
+      } else {
         ULOG_INFO("Updated RTC time.");
         displayTime();
+#endif
       }
     }
 
@@ -553,11 +557,12 @@ void processNTP() {
     udp.write(packetBuffer, NTP_PACKET_SIZE);
     udp.endPacket();
     udp.flush();
-    if (ULOG_ENABLED) {
-      ULOG_INFO("Received a request from %s:%i", Remote.toString().c_str(),
-                PortNum);
-      displayTime();
-    }
+#ifdef ULOG_ENABLED
+
+    ULOG_INFO("Received a request from %s:%i", Remote.toString().c_str(),
+              PortNum);
+    displayTime();
+#endif
   }
 }
 
