@@ -16,12 +16,6 @@ except ImportError:
 
 config = dotenv.dotenv_values(".env")
 
-SOURCE_VARS = {
-    "LOGGER_LEVEL",
-}
-
-
-src_flags = []
 global_flags = []
 for var, value in config.items():
     formatted_var = ""
@@ -29,10 +23,6 @@ for var, value in config.items():
         formatted_var = f'-D{var}="{value}"'
     else:
         formatted_var = f"-D{var}"
-    if var in SOURCE_VARS:
-        src_flags.append(formatted_var)
-    else:
-        global_flags.append(formatted_var)
+    global_flags.append(formatted_var)
 
-env.Append(BUILD_SRC_FLAGS=src_flags)  # type: ignore # noqa: F821
 env.Append(BUILD_FLAGS=global_flags)  # type: ignore # noqa: F821
