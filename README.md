@@ -12,14 +12,13 @@
 
 ## About
 
-A networked power-over-ethernet GPS stratum 1 clock[^1]. Uses both a RTC module and a GPS module to have a fallback in the event that the GPS signal is lost.
+ProtoTime is a networked power-over-ethernet GPS stratum 1 clock[^1]. ProtoTime uses both a RTC module and a GPS module to have a fallback for when the GPS signal is lost.
 
-Ever since my first days of theatre, one of the people I work with, had, on multiple occassions, remarked how a real time clock server would suit our network nicely, but we could not afford an expensive professionally built module at that point in time. I had the idea from then on, that some day, I wanted to build my own time server, as it didn't seem like it could be too hard. (Spoiler alert, it really wasn't.)
+ProtoTime is the physical manifestation of one of the first things I ever wanted to build. Ever since my first days involved in technical theatre, one of my team consistently remarked how a real time clock server would suit our lighting network nicely, but we all knew we couldn't afford any of the time servers available on the market. Its been over 3 years since I worked at that place, but the idea never left my mind. It always seemed like a simple project, just a microcontroller and a GPS module, never seemed like it was too hard or outside of my abilities. (Spoiler alert, it really wasn't hard at all!)
 
 ## Building your own
 
 ### Required parts
-
 
 - [T-Ethernet-POE](https://www.lilygo.cc/products/t-internet-poe) from LILYGO.
   - Make sure to get the one with a programmer as well, even if you have one. Their pinout is different from a typical programmer and has weird pin spacing, so its recommended to get a programmer. Do note that this module is *not* electrically isolated, so you should have it connected to both POE power and usb power simultaneously.
