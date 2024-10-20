@@ -12,6 +12,7 @@
 #include <ETHClass2.h>
 #include <RTClib.h>
 #include <TinyGPS++.h>
+#include <WiFi.h>
 
 #define vers "NTP GPS V03"
 
@@ -68,7 +69,8 @@ const int CENTURY = 2000; // current century
 
 // Ethernet UDP instance
 // the class naming is due to how the ETHClass2 library is implemented
-WiFiUDP udp;
+WiFiUDP ethUdp;
+WiFiUDP wifiUdp;
 
 // GPS instance
 // uses the GPSSerial as defined above
@@ -119,14 +121,16 @@ const unsigned long seventyYears =
 // Ethernet
 
 // Flag indicating whether the ethernet is connected
-static bool eth_connected = false;
+bool eth_connected = false;
+// Flag indicating whether the wifi is connected
+bool wifi_connected = false;
 
 enum class Source { GPS, RTC, NONE };
 
 // Function prototypes
 
 void WiFiEvent(arduino_event_id_t event);
-void processNTP();
+void processNTP(WiFiUDP &udp);
 boolean getGPSdata(bool allowBlocking = true);
 DateTime getTimefromString(String sDate, String sTime);
 bool updateRTC(bool allowBlocking);
@@ -185,7 +189,15 @@ void setup() {
     ULOG_ERROR("ETH start Failed!");
   }
 
-  udp.begin(NTP_PORT);
+#if defined(WIFI_SSID) && defined(WIFI_PASS)
+  ULOG_INFO("Connecting to WiFi network %s", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+#elif defined(WIFI_SSID)
+  ULOG_INFO("Connecting to WiFi network %s", WIFI_SSID);
+  WiFi.begin(WIFI_SSID);
+#else
+  ULOG_INFO("No WiFi network specified");
+#endif
 
   ULOG_INFO("Version: %s", std::string(vers).c_str());
 
@@ -278,8 +290,13 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
 
   // process any NTP requests
   if (eth_connected) {
-    processNTP();
+    processNTP(ethUdp);
   }
+#ifdef WIFI_SSID
+  if (wifi_connected) {
+    processNTP(wifiUdp);
+  }
+#endif
 
   // empty the serial buffer
   while (GPSSerial.available()) {
@@ -318,8 +335,15 @@ void WiFiEvent(arduino_event_id_t event) {
     // set eth hostname here
     ETH.setHostname("esp32-ethernet");
     break;
+  case ARDUINO_EVENT_WIFI_STA_START:
+    ULOG_INFO("WiFi Started");
+    WiFi.setHostname("esp32-wifi");
+    break;
   case ARDUINO_EVENT_ETH_CONNECTED:
     ULOG_INFO("ETH Connected");
+    break;
+  case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+    ULOG_INFO("WiFi Connected");
     break;
   case ARDUINO_EVENT_ETH_GOT_IP:
     ULOG_INFO("ETH MAC: %s, IPv4: %s, %s, %uMbps", ETH.macAddress().c_str(),
@@ -327,15 +351,29 @@ void WiFiEvent(arduino_event_id_t event) {
               ETH.fullDuplex() ? "FULL_DUPLEX" : "HALF_DUPLEX",
               ETH.linkSpeed());
 
+    ethUdp.begin(ETH.localIP(), NTP_PORT);
     eth_connected = true;
+    break;
+  case SYSTEM_EVENT_STA_GOT_IP:
+    ULOG_INFO("WiFi Connected, IP: %s", WiFi.localIP().toString().c_str());
+    wifiUdp.begin(WiFi.localIP(), NTP_PORT);
+    wifi_connected = true;
     break;
   case ARDUINO_EVENT_ETH_DISCONNECTED:
     ULOG_INFO("ETH Disconnected");
     eth_connected = false;
     break;
+  case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    ULOG_INFO("WiFi Disconnected");
+    wifi_connected = false;
+    break;
   case ARDUINO_EVENT_ETH_STOP:
     ULOG_INFO("ETH Stopped");
     eth_connected = false;
+    break;
+  case ARDUINO_EVENT_WIFI_STA_STOP:
+    ULOG_INFO("WiFi Stopped");
+    wifi_connected = false;
     break;
   default:
     break;
@@ -443,7 +481,7 @@ void syncToRTCPPS() { startofRTCSec = millis(); }
 /// @brief Process NTP requests
 /// This function is called whenever an NTP request is received
 /// There is not much checking of whether or not a packet is valid
-void processNTP() {
+void processNTP(WiFiUDP &udp) {
 
   // if there's data available, read a packet
   int packetSize = udp.parsePacket();
