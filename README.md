@@ -30,8 +30,6 @@ ProtoTime would likely work with different microcontrollers options and ethernet
 
 There is not a wiring guide as of yet, but the pins are defined in the source file. Both of the GPS and RTC modules require 3.3V and GND, and we have exactly two pins of each on the T-Ethernet-POE! As for the rest of the wires, all pins should be connected to the controller, aside from the 32K clock from the RTC module.
 
-While not many choices are afforded, there is one option regarding the RTC. You *can* opt to run it without a battery, but behaviour when there are no known-good time sources is currently unknown. This should be fixed in a future version.
-
 ## Credits
 
 The first few commits and working models of this project were based  <https://lloydm.net/Demos/GPS-NTP.html>, which itself was based on <https://forum.arduino.cc/index.php?topic=197870.0>.

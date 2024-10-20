@@ -35,7 +35,7 @@ const u_int8_t GPS_PPS_PIN = 33;
 //  RTC
 const u_int8_t RTC_SDA_PIN = 32;
 const u_int8_t RTC_SCL_PIN = 16;
-const u_int8_t RTC_SQW_PIN = 39;
+const u_int8_t RTC_SQW_PIN = 14;
 
 // GPS serial
 const u_int16_t GPS_BAUD = 9600;
@@ -120,7 +120,7 @@ const unsigned long seventyYears =
 // Flag indicating whether the ethernet is connected
 static bool eth_connected = false;
 
-enum class Source { GPS, RTC };
+enum class Source { GPS, RTC, NONE };
 
 // Function prototypes
 
@@ -131,6 +131,7 @@ DateTime getTimefromString(String sDate, String sTime);
 bool updateRTC(bool allowBlocking);
 boolean rtcUpdateDue();
 Source readTime();
+Source readTime(Source source);
 bool getgps();
 void displayTime();
 String formatMS(int ms);
@@ -154,6 +155,7 @@ void setup() {
   Serial.begin(115200);
   GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
   pinMode(GPS_PPS_PIN, INPUT_PULLDOWN);
+  pinMode(RTC_SQW_PIN, INPUT_PULLDOWN);
 
   ULOG_INIT();
 
@@ -200,44 +202,8 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(GPS_PPS_PIN), syncToPPS, RISING);
 
-  // If RTC is present and functional, update it from GPS (if possible)
-  bool gpsValid = false;
-  bool validTime = false;
-  if (rtcON) {
-    if (ULOG_ENABLED) {
-      ULOG_DEBUG("Real-time clock (before startup sync): ");
-      readTime();
-      displayTime();
-    }
-    delay(3000);
-    // empty the serial buffer
-    while (GPSSerial.available()) {
-      GPSSerial.read();
-    }
-    validTime = updateRTC(true);
-    gpsValid = validTime;
-
-    if (ULOG_ENABLED) {
-      if (!validTime) {
-        ULOG_ERROR("RTC update failed.");
-      } else {
-        ULOG_INFO("Real-time clock (after startup sync): ");
-        readTime();
-        displayTime();
-      }
-    }
-
-    // enable the SQW pin to output a 1Hz signal
-    setRTCSettings();
-    attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS, FALLING);
-  };
-
-  if (!gpsValid) {
-    gpsValid = getGPSdata(true);
-  }
-
   uint32_t lastStart = startofSec;
-  if (startofSec == 0 && gpsValid) {
+  if (startofSec == 0) {
     ULOG_INFO("No PPS pulse received, waiting for a pulse.");
     delay(1000); // wait for the first PPS pulse
   }
@@ -247,6 +213,33 @@ void setup() {
   } else {
     ULOG_INFO("PPS pulse detected.");
   }
+
+  // If RTC is present and functional, update it from GPS (if possible)
+  rtcActive = !rtc.lostPower();
+
+  if (rtcON) {
+    if (ULOG_ENABLED) {
+      ULOG_DEBUG("Real-time clock (before startup sync): ");
+      readTime(Source::RTC);
+      displayTime();
+    }
+    delay(3000);
+    // empty the serial buffer
+    while (GPSSerial.available()) {
+      GPSSerial.read();
+    }
+    if (!updateRTC(true)) {
+      ULOG_ERROR("RTC update failed.");
+    } else if (ULOG_ENABLED) {
+      ULOG_INFO("Real-time clock (after startup sync): ");
+      readTime(Source::RTC);
+      displayTime();
+    }
+
+    // enable the SQW pin to output a 1Hz signal
+    setRTCSettings();
+    attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS, FALLING);
+  };
 }
 
 void loop() { // Original loop received data from GPS continuously (i.e. per
@@ -267,6 +260,7 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
         ULOG_INFO("RTC update due, updating RTC...");
       }
     }
+    rtcActive &= !lostPower;
     if (gpsActive) {
       if (!updateRTC(false)) {
         ULOG_ERROR("RTC update failed.");
@@ -282,21 +276,26 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
       attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS,
                       FALLING);
     }
-  } else {
-    // empty the serial buffer
-    while (GPSSerial.available()) {
-      GPSSerial.read();
-    }
-    if (gpsActive && millis() - startofSec > 2000) {
-      gpsActive = false;
-      ULOG_WARNING("GPS signal lost.");
-      gpsNeedsSettings = true;
-    }
-    if (gpsActive && millis() - startofSec < 1000 && gpsNeedsSettings) {
-      ULOG_INFO("GPS Signal Restored");
-      setGPSSettings();
-      gpsNeedsSettings = false;
-    }
+  }
+  // empty the serial buffer
+  while (GPSSerial.available()) {
+    GPSSerial.read();
+  }
+
+  if (gpsActive && millis() - startofSec > 2000) {
+    gpsActive = false;
+    ULOG_WARNING("GPS signal lost.");
+    gpsNeedsSettings = true;
+  }
+  if (gpsActive && millis() - startofSec < 1000 && gpsNeedsSettings) {
+    ULOG_INFO("GPS Signal Restored");
+    setGPSSettings();
+    gpsNeedsSettings = false;
+  }
+
+  if (rtcActive && millis() - startofRTCSec > 2000) {
+    rtcActive = false;
+    ULOG_WARNING("RTC signal lost.");
   }
 }
 
@@ -465,69 +464,78 @@ void processNTP() {
     // No additional parsing required here
 
     if (source == Source::GPS) {
+      ULOG_INFO("GPS source");
       packetBuffer[12] = 71;  //"G";
       packetBuffer[13] = 80;  //"P";
       packetBuffer[14] = 83;  //"S";
       packetBuffer[15] = 115; //"s";
     } else if (source == Source::RTC) {
+      ULOG_INFO("RTC source");
       packetBuffer[12] = 80; //"P";
       packetBuffer[13] = 80; //"P";
       packetBuffer[14] = 83; //"S";
       packetBuffer[15] = 0;  //" ";
     } else {
-      ULOG_WARNING("No time source available.");
-      return; // No time source available
+      ULOG_INFO("No source");
+      packetBuffer[1] =
+          16; // stratum 16 because our time is now invalid to provide
     }
 
-    // Reference timestamp
-    tempval = referenceTimestamp + seventyYears;
-    packetBuffer[16] = (tempval >> 24) & 0XFF;
-    packetBuffer[17] = (tempval >> 16) & 0xFF;
-    packetBuffer[18] = (tempval >> 8) & 0xFF;
-    packetBuffer[19] = (tempval) & 0xFF;
+    if (source == Source::GPS || source == Source::RTC) {
+      // Reference timestamp
+      tempval = referenceTimestamp + seventyYears;
+      packetBuffer[16] = (tempval >> 24) & 0XFF;
+      packetBuffer[17] = (tempval >> 16) & 0xFF;
+      packetBuffer[18] = (tempval >> 8) & 0xFF;
+      packetBuffer[19] = (tempval) & 0xFF;
 
-    tempval = 0;
-    packetBuffer[20] = (tempval >> 24) & 0xFF;
-    packetBuffer[21] = (tempval >> 16) & 0xFF;
-    packetBuffer[22] = (tempval >> 8) & 0xFF;
-    packetBuffer[23] = (tempval) & 0xFF;
+      tempval = 0;
+      packetBuffer[20] = (tempval >> 24) & 0xFF;
+      packetBuffer[21] = (tempval >> 16) & 0xFF;
+      packetBuffer[22] = (tempval >> 8) & 0xFF;
+      packetBuffer[23] = (tempval) & 0xFF;
 
-    // Originate timestamp from incoming UDP transmit timestamp
-    packetBuffer[24] = packetBuffer[40];
-    packetBuffer[25] = packetBuffer[41];
-    packetBuffer[26] = packetBuffer[42];
-    packetBuffer[27] = packetBuffer[43];
-    packetBuffer[28] = packetBuffer[44];
-    packetBuffer[29] = packetBuffer[45];
-    packetBuffer[30] = packetBuffer[46];
-    packetBuffer[31] = packetBuffer[47];
+      // Originate timestamp from incoming UDP transmit timestamp
+      packetBuffer[24] = packetBuffer[40];
+      packetBuffer[25] = packetBuffer[41];
+      packetBuffer[26] = packetBuffer[42];
+      packetBuffer[27] = packetBuffer[43];
+      packetBuffer[28] = packetBuffer[44];
+      packetBuffer[29] = packetBuffer[45];
+      packetBuffer[30] = packetBuffer[46];
+      packetBuffer[31] = packetBuffer[47];
 
-    // Receive timestamp
-    tempval = timestamp; // when we received this packet and its timestamp
-    packetBuffer[32] = (tempval >> 24) & 0XFF;
-    packetBuffer[33] = (tempval >> 16) & 0xFF;
-    packetBuffer[34] = (tempval >> 8) & 0xFF;
-    packetBuffer[35] = (tempval) & 0xFF;
+      // Receive timestamp
+      tempval = timestamp; // when we received this packet and its timestamp
+      packetBuffer[32] = (tempval >> 24) & 0XFF;
+      packetBuffer[33] = (tempval >> 16) & 0xFF;
+      packetBuffer[34] = (tempval >> 8) & 0xFF;
+      packetBuffer[35] = (tempval) & 0xFF;
 
-    tempval = fractionalSecond;
-    packetBuffer[36] = (tempval >> 24) & 0xFF;
-    packetBuffer[37] = (tempval >> 16) & 0xFF;
-    packetBuffer[38] = (tempval >> 8) & 0xFF;
-    packetBuffer[39] = (tempval) & 0xFF;
+      tempval = fractionalSecond;
+      packetBuffer[36] = (tempval >> 24) & 0xFF;
+      packetBuffer[37] = (tempval >> 16) & 0xFF;
+      packetBuffer[38] = (tempval >> 8) & 0xFF;
+      packetBuffer[39] = (tempval) & 0xFF;
 
-    // Transmit timestamp
-    tempval = timestamp;
-    packetBuffer[40] = (tempval >> 24) & 0XFF;
-    packetBuffer[41] = (tempval >> 16) & 0xFF;
-    packetBuffer[42] = (tempval >> 8) & 0xFF;
-    packetBuffer[43] = (tempval) & 0xFF;
+      // Transmit timestamp
+      tempval = timestamp;
+      packetBuffer[40] = (tempval >> 24) & 0XFF;
+      packetBuffer[41] = (tempval >> 16) & 0xFF;
+      packetBuffer[42] = (tempval >> 8) & 0xFF;
+      packetBuffer[43] = (tempval) & 0xFF;
 
-    tempval = fractionalSecond;
-    packetBuffer[44] = (tempval >> 24) & 0xFF;
-    packetBuffer[45] = (tempval >> 16) & 0xFF;
-    packetBuffer[46] = (tempval >> 8) & 0xFF;
-    packetBuffer[47] = (tempval) & 0xFF;
-    // ;
+      tempval = fractionalSecond;
+      packetBuffer[44] = (tempval >> 24) & 0xFF;
+      packetBuffer[45] = (tempval >> 16) & 0xFF;
+      packetBuffer[46] = (tempval >> 8) & 0xFF;
+      packetBuffer[47] = (tempval) & 0xFF;
+    } else {
+      // source is invalid
+      for (int i = 16; i < 48; i++) {
+        packetBuffer[i] = 0;
+      }
+    }
 
     // Omit optional fields
 
@@ -656,6 +664,7 @@ bool updateRTC(bool allowBlocking) { // From GPS
   ULOG_DEBUG("RTC updated.");
   lastGPSsync = now; // For subsequent updates (and milliseconds computation)
 
+  rtcActive = true;
   return true;
 }
 
@@ -663,6 +672,8 @@ bool updateRTC(bool allowBlocking) { // From GPS
 /// @return whether the RTC update is due
 boolean rtcUpdateDue() { // Convenience test
   if (rtcON) {
+    if (!rtcActive)
+      return true;
     if (lastGPSsync == 0)
       return true;
     if (millis() < lastGPSsync)
@@ -678,22 +689,33 @@ boolean rtcUpdateDue() { // Convenience test
 /// @brief Read time from RTC or GPS
 /// The time is read into the global timestamp object.
 /// @return Which source the time was read from.
-Source readTime() { // Read time from RTC or GPS
+Source readTime(Source source) { // Read time from RTC or GPS
   rtcNow = rtc.now();
   // DS3231 does not have milliseconds! Need a separate millisecond clock -
   // ouch! RTC is synched to GPS at least hourly. Arduino's millisecond counter
   // is good for that range.
   uint_fast32_t secStart;
-  Source source;
   long delta;
-  if (gpsActive) {
+  switch (source) {
+  case Source::GPS:
+    if (!gpsActive)
+      return Source::NONE;
     secStart = startofSec;
-    source = Source::GPS;
     delta = millis() - secStart;
-  } else {
+    break;
+  case Source::RTC:
+    if (!rtcActive)
+      return Source::NONE;
     secStart = startofRTCSec;
-    source = Source::RTC;
     delta = millis() - secStart + rtcOffset;
+    break;
+  default:
+    if (gpsActive)
+      return readTime(Source::GPS);
+    if (rtcActive)
+      return readTime(Source::RTC);
+    return Source::NONE;
+    break;
   };
   // To do: Handle rollover rigorously - Next is placeholder
   //        Or power-cycle the Arduino occasionally (before 50 days)
@@ -714,6 +736,8 @@ Source readTime() { // Read time from RTC or GPS
   fractionalSecond = ((double)milliseconds / 1000.) * MAXUINT32;
   return source;
 }
+
+Source readTime() { return readTime(Source::NONE); }
 
 /// @brief  Display the current time
 /// This function is used for debugging purposes
