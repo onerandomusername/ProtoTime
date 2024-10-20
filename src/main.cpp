@@ -172,7 +172,7 @@ void setup() {
 
   WiFi.onEvent(WiFiEvent);
 
-  while (millis() < 5000 && gps.charsProcessed() < 60 &&
+  while (millis() < 1500 && gps.charsProcessed() < 60 &&
          !GPSSerial.availableForWrite()) {
     ULOG_INFO("Waiting for GPS Serial Monitor...");
     // getgps();
@@ -192,8 +192,6 @@ void setup() {
   setGPSSettings();
 
   Wire1.begin(RTC_SDA_PIN, RTC_SCL_PIN);
-  delay(250);
-
   if (rtc.begin(&Wire1)) {
     rtcON = true;
     ULOG_INFO("RTC is connected!");
@@ -224,7 +222,6 @@ void setup() {
       readTime(Source::RTC);
       displayTime();
     }
-    delay(3000);
     // empty the serial buffer
     while (GPSSerial.available()) {
       GPSSerial.read();
@@ -247,11 +244,7 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
               // second) and called processNTP() when valid data were received
               // (i.e. on the second). This revision monitors NTP port
               // continuously and attempts to retrieve GPS data whenever an NTP
-              // request is received.\
-
-  if (eth_connected) {
-    processNTP();
-  }
+              // request is received.
   if (rtcUpdateDue()) {
     bool lostPower = rtc.lostPower();
     if (!(!rtcActive && lostPower) && gpsActive) {
@@ -278,6 +271,12 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
                       FALLING);
     }
   }
+
+  // process any NTP requests
+  if (eth_connected) {
+    processNTP();
+  }
+
   // empty the serial buffer
   while (GPSSerial.available()) {
     GPSSerial.read();
@@ -593,7 +592,8 @@ bool getgps() {
 boolean getGPSdata(boolean allowBlocking) {
   long startTime = millis();
   bool validDataReceived = false;
-  const long TIMEOUT = 5000;
+  const long TIMEOUT =
+      3000; // this is ran 3 times so this time is effectively tripled
   if (!allowBlocking && !GPSSerial.available())
     return false; // shortcut to block all logging and zero checking. can't
                   // do anything with no data.
