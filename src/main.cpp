@@ -451,7 +451,7 @@ void processNTP() {
 
     packetBuffer[0] = 0b00100100; // LI, Version, Mode
 
-    packetBuffer[1] = 1; // we're always stratum 1 even if we're on the RTC.
+    // stratum is set later
 
     packetBuffer[2] = 6;    // polling minimum (64 seconds - default)
     packetBuffer[3] = 0xF7; // precision (2^-9 ~2 milliseconds)
@@ -472,16 +472,18 @@ void processNTP() {
 
     if (source == Source::GPS) {
       ULOG_INFO("GPS source");
-      packetBuffer[12] = 71;  //"G";
-      packetBuffer[13] = 80;  //"P";
-      packetBuffer[14] = 83;  //"S";
-      packetBuffer[15] = 115; //"s";
-    } else if (source == Source::RTC) {
-      ULOG_INFO("RTC source");
-      packetBuffer[12] = 80; //"P";
+      packetBuffer[1] = 1;   // stratum 1 because we're using the GPS
+      packetBuffer[12] = 71; //"G";
       packetBuffer[13] = 80; //"P";
       packetBuffer[14] = 83; //"S";
       packetBuffer[15] = 0;  //" ";
+    } else if (source == Source::RTC) {
+      ULOG_INFO("RTC source");
+      packetBuffer[1] = 2; // stratum 2 because we're using the RTC
+      packetBuffer[12] = 127;
+      packetBuffer[13] = 0;
+      packetBuffer[14] = 0;
+      packetBuffer[15] = 1;
     } else {
       ULOG_INFO("No source");
       packetBuffer[1] =
