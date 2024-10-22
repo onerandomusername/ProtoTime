@@ -19,8 +19,18 @@ config = dotenv.dotenv_values(".env")
 
 LOCAL_VARS = {
     "LOGGER_LEVEL",
+    "SUBNET_MASK",
+    "STATIC_IP",
+    "GATEWAY",
+    "DNS_1",
+    "DNS_2",
     "WIFI_SSID",
     "WIFI_PASS",
+    "WIFI_STATIC_IP",
+    "WIFI_SUBNET_MASK",
+    "WIFI_GATEWAY",
+    "WIFI_DNS_1",
+    "WIFI_DNS_2",
 }
 
 global_flags = []

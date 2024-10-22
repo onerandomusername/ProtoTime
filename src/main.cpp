@@ -27,6 +27,64 @@
 #define ETH_MDC_PIN 23
 #define ETH_MDIO_PIN 18
 
+#ifdef STATIC_IP
+IPAddress staticIP = IPAddress();
+bool _unused_var0 = staticIP.fromString(STATIC_IP);
+#ifdef SUBNET_MASK
+IPAddress subnetMask = IPAddress();
+bool _unused_var1 = subnetMask.fromString(SUBNET_MASK);
+#else
+IPAddress subnetMask = IPAddress(255, 255, 255, 0);
+#endif // SUBNET_MASK
+#ifdef GATEWAY
+IPAddress gateway = IPAddress();
+bool _unused_var2 = gateway.fromString(GATEWAY);
+#else
+IPAddress gateway = IPAddress(192, 168, 1, 1);
+#endif // GATEWAY
+#ifdef DNS_1
+IPAddress dns = IPAddress();
+bool _unused_var3 = dns.fromString(DNS_1);
+#else
+IPAddress dns = IPAddress(1, 1, 1, 1);
+#endif // DNS_1
+#ifdef DNS_2
+IPAddress dns2 = IPAddress();
+bool _unused_var4 = dns.fromString(DNS_2);
+#else
+IPAddress dns2 = IPAddress(1, 0, 0, 1);
+#endif // DNS_2
+#endif // STATIC_IP
+
+#ifdef WIFI_STATIC_IP
+IPAddress wifiStaticIP = IPAddress();
+bool _unused_varw0 = staticIP.fromString(WIFI_STATIC_IP);
+#ifdef WIFI_SUBNET_MASK
+IPAddress wifiSubnetMask = IPAddress();
+bool _unused_varw1 = subnetMask.fromString(WIFI_SUBNET_MASK);
+#else
+IPAddress wifiSubnetMask = IPAddress(255, 255, 255, 0);
+#endif // WIFI_SUBNET_MASK
+#ifdef WIFI_GATEWAY
+IPAddress wifiGateway = IPAddress();
+bool _unused_varw2 = gateway.fromString(WIFI_GATEWAY);
+#else
+IPAddress wifiGateway = IPAddress(192, 168, 1, 1);
+#endif // WIFI_GATEWAY
+#ifdef WIFI_DNS_1
+IPAddress wifiDns = IPAddress();
+bool _unused_varw3 = dns.fromString(WIFI_DNS_1);
+#else
+IPAddress wifiDns = IPAddress(1, 1, 1, 1);
+#endif // WIFI_DNS_1
+#ifdef WIFI_DNS_2
+IPAddress wifiDns2 = IPAddress();
+bool _unused_varw4 = dns.fromString(WIFI_DNS_2);
+#else
+IPAddress wifiDns2 = IPAddress(1, 1, 1, 1);
+#endif // WIFI_DNS_2
+#endif // WIFI_STATIC_IP
+
 // PINS
 //  GPS
 const u_int8_t GPS_RX_PIN = 36;
@@ -180,6 +238,22 @@ void setup() {
     ULOG_ERROR("ETH start Failed!");
   }
 
+  // configure static IPs
+#ifdef STATIC_IP
+  if (!ETH.config(staticIP, gateway, subnetMask, dns, dns2)) {
+    ULOG_ERROR("ETH config Failed!");
+  }
+#endif // STATIC_IP
+
+#if defined(WIFI_SSID) && defined(WIFI_STATIC_IP)
+  // this may need to be after the WIFI begin but I don't currently have a wifi
+  // network to test with. examples showed this before begin.
+  if (!WiFi.config(wifiStaticIP, wifiGateway, wifiSubnetMask, wifiDns,
+                   wifiDns2)) {
+    ULOG_ERROR("WiFi config Failed!");
+  }
+#endif // WIFI_SSID && WIFI_STATIC_IP
+
 #if defined(WIFI_SSID) && defined(WIFI_PASS)
   ULOG_INFO("Connecting to WiFi network %s", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -188,7 +262,7 @@ void setup() {
   WiFi.begin(WIFI_SSID);
 #else
   ULOG_INFO("No WiFi network specified");
-#endif
+#endif // WIFI_SSID
 
   ULOG_INFO("Version: %s", std::string(vers).c_str());
 
@@ -332,6 +406,9 @@ void WiFiEvent(arduino_event_id_t event) {
               ETH.localIP().toString().c_str(),
               ETH.fullDuplex() ? "FULL_DUPLEX" : "HALF_DUPLEX",
               ETH.linkSpeed());
+    ULOG_INFO("ETH Subnet Mask: %s, DNS1: %s, DNS2: %s",
+              ETH.subnetMask().toString().c_str(),
+              ETH.dnsIP(0).toString().c_str(), ETH.dnsIP(1).toString().c_str());
 
     ethUdp.begin(ETH.localIP(), NTP_PORT);
     eth_connected = true;
@@ -346,7 +423,8 @@ void WiFiEvent(arduino_event_id_t event) {
     eth_connected = false;
     break;
   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-    ULOG_INFO("WiFi Disconnected");
+    if (wifi_connected)
+      ULOG_INFO("WiFi Disconnected");
     wifi_connected = false;
     break;
   case ARDUINO_EVENT_ETH_STOP:
