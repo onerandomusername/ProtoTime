@@ -145,6 +145,8 @@ volatile bool gpsActive = false;
 bool rtcActive = false; // set to the inverse of rtc.lostPower()
 bool gpsNeedsSettings = true;
 
+uint32_t rtcLoadedAt = 0;
+
 uint32_t tempval;
 
 // Time of last RTC update by Arduino run-time clock
@@ -312,6 +314,7 @@ void setup() {
     // enable the SQW pin to output a 1Hz signal
     setRTCSettings();
     attachInterrupt(digitalPinToInterrupt(RTC_SQW_PIN), syncToRTCPPS, FALLING);
+    rtcLoadedAt = millis();
   };
 }
 
@@ -370,7 +373,8 @@ void loop() { // Original loop received data from GPS continuously (i.e. per
     gpsNeedsSettings = false;
   }
 
-  if (rtcActive && millis() - startofRTCSec > 2000) {
+  if (rtcActive && millis() - startofRTCSec > 2000 &&
+      millis() - rtcLoadedAt > 2000) {
     rtcPulseAlive = false;
     rtcActive = false;
     ULOG_WARNING("RTC signal lost.");
@@ -591,7 +595,7 @@ void processNTP(WiFiUDP &udp) {
 
     if (source == Source::GPS || source == Source::RTC) {
       // Reference timestamp
-      tempval = referenceTimestamp + seventyYears;
+      tempval = referenceTimestamp;
       packetBuffer[16] = (tempval >> 24) & 0XFF;
       packetBuffer[17] = (tempval >> 16) & 0xFF;
       packetBuffer[18] = (tempval >> 8) & 0xFF;
@@ -692,11 +696,13 @@ bool updateRTC() { // From GPS
   ut = ut + TimeSpan(1 + rtcOffset / 1000);
   rtc.adjust(ut);
   timestamp = ut.unixtime() + seventyYears;
+  referenceTimestamp = timestamp;
   rtcOffset = rtcOffset % 1000;
   ULOG_DEBUG("RTC updated.");
   lastGPSsync = now; // For subsequent updates (and milliseconds computation)
 
   rtcActive = true;
+  rtcLoadedAt = millis();
   return true;
 }
 
@@ -742,10 +748,11 @@ Source readTime(Source source) { // Read time from RTC or GPS
     delta = millis() - secStart + rtcOffset;
     break;
   default:
-    if (gpsActive)
-      return readTime(Source::GPS);
-    if (rtcActive)
+    if (rtcActive) {
+      if (gpsActive)
+        return readTime(Source::GPS);
       return readTime(Source::RTC);
+    }
     return Source::NONE;
     break;
   };
